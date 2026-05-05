@@ -1,0 +1,53 @@
+# Seedance Local
+
+A local browser app for generating Seedance 2.0 videos through Fal.ai while keeping your API key on your machine.
+
+## Setup
+
+1. Install dependencies:
+
+   ```bash
+   npm install
+   ```
+
+2. Create your local environment file:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+3. Add your local API keys to `.env`:
+
+   ```bash
+   FAL_KEY=your_fal_key_here
+   GOOGLE_API_KEY=your_google_api_key_here
+   ```
+
+4. Start the app:
+
+   ```bash
+   npm run dev
+   ```
+
+5. Open `http://127.0.0.1:5173`.
+
+## One-Click Launch
+
+Double-click `VS_AI.app` in this folder to start the local backend, start the Vite UI, and open the app in a standalone browser window. `VS_AI.command` does the same thing with terminal logs visible.
+
+## How Routing Works
+
+- No image files: `bytedance/seedance-2.0/text-to-video`
+- Start frame, optional end frame: `bytedance/seedance-2.0/image-to-video`
+- Reference images without a start frame: `bytedance/seedance-2.0/reference-to-video`
+- Fast mode inserts `/fast/` into the same endpoint family.
+
+Generated videos are downloaded into `outputs/`. Uploaded source images are retained in `uploads/`.
+
+## Notes
+
+Fal's Seedance 2.0 schema currently supports `480p`, `720p`, `1080p`, durations from `4` to `15` seconds or `auto`, aspect ratios including `16:9`, `9:16`, `1:1`, and synchronized audio generation.
+
+## Named References
+
+Reference images can be renamed in the thumbnail strip. Use those handles in your prompt with `@`, such as `@product` or `@talent`. The app translates your names to Fal's required `@Image1`, `@Image2`, etc. tokens before sending the request.

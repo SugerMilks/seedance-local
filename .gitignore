@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.DS_Store
+uploads/*
+outputs/*
+server/data/history.json
+server/data/node-projects.json
+.vs_ai_logs/
+!uploads/.gitkeep
+!outputs/.gitkeep
