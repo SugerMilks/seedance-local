@@ -853,7 +853,7 @@ export default function NodeEditor() {
 
       if (node.type === "imageModel") {
         const imagePromptItems = connectedImagePromptItems(incoming.imagePromptIn);
-        const prompt = appendStyleInstructions(basePrompt, incoming.imagePromptIn);
+        const prompt = buildEffectiveImagePrompt(basePrompt, incoming.imagePromptIn, node.data.aspectRatio);
         const response = await fetch("/api/node/generate-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1305,6 +1305,8 @@ function NodeBody({
   if (node.type === "imageModel") {
     const promptValue = connectedText(incoming.promptIn) || node.data.prompt;
     const promptConnected = Boolean(connectedText(incoming.promptIn));
+    const effectivePromptValue = buildEffectiveImagePrompt(promptValue, incoming.imagePromptIn, node.data.aspectRatio);
+    const promptHasGeneratedAdditions = effectivePromptValue !== promptValue;
     const imagePromptLabel = connectedSummary(incoming.imagePromptIn, "Add file");
     const promptPort = config.input.find((port) => port.id === "promptIn");
     const imagePromptPort = config.input.find((port) => port.id === "imagePromptIn");
@@ -1323,6 +1325,12 @@ function NodeBody({
         <NodeRow label="Prompt" inputPort={promptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
           <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
         </NodeRow>
+        {promptHasGeneratedAdditions && (
+          <div className="effective-prompt-preview">
+            <span>Effective prompt sent to image model</span>
+            <textarea readOnly value={effectivePromptValue} />
+          </div>
+        )}
         <details open>
           <summary>Settings</summary>
           <NodeRow label="Image Prompt" inputPort={imagePromptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -1594,13 +1602,19 @@ function connectedImagePromptItems(items = []) {
     .filter(Boolean);
 }
 
-function appendStyleInstructions(prompt, items = []) {
+function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
   const styleInstructions = items
     .map(({ source }) => (source.type === "style" && source.data.activated && source.data.resultUrl ? source.data.hiddenPrompt || stylePromptSuffix : ""))
     .filter(Boolean);
 
   if (!styleInstructions.length) return prompt;
-  return [prompt, ...styleInstructions].filter(Boolean).join("\n\n");
+
+  const ratio = extractAspectRatio(aspectRatio);
+  const aspectInstruction = ratio
+    ? `Generate the final image in the Image Model node's selected ${ratio} aspect ratio. Do not copy STYLE.png's collage layout or aspect ratio into the final image.`
+    : "";
+
+  return [prompt, ...styleInstructions, aspectInstruction].filter(Boolean).join("\n\n");
 }
 
 function connectedSummary(items = [], fallback) {
@@ -1614,6 +1628,10 @@ function sourceLabel(source) {
   if (source.data.resultUrl) return source.data.resultUrl.split("/").pop();
   if (source.data.fileName) return source.data.fileName;
   return source.data.title || source.type;
+}
+
+function extractAspectRatio(value) {
+  return String(value || "").match(/\d+:\d+/)?.[0] || "";
 }
 
 async function createStyleCollageBlob(images) {

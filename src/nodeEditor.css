@@ -695,6 +695,32 @@
   padding: 9px;
 }
 
+.effective-prompt-preview {
+  display: grid;
+  gap: 7px;
+  margin: -2px 0 12px 146px;
+}
+
+.effective-prompt-preview span {
+  color: rgba(221, 198, 49, 0.66);
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.effective-prompt-preview textarea {
+  width: 100%;
+  min-height: 142px;
+  padding: 9px;
+  border: 1px solid rgba(221, 198, 49, 0.2);
+  border-radius: 7px;
+  outline: 0;
+  color: rgba(244, 240, 232, 0.74);
+  background: rgba(221, 198, 49, 0.08);
+  font-size: 12px;
+  line-height: 1.38;
+  resize: vertical;
+}
+
 .node-row option {
   color: #141414;
 }

@@ -204,6 +204,10 @@ app.post("/api/node/generate-image", async (req, res) => {
     const model = normalizeImageModel(req.body.model);
     const imagePromptUrls = Array.isArray(req.body.imagePromptUrls) ? req.body.imagePromptUrls.filter(isLocalAssetUrl) : [];
     const imagePromptLabels = Array.isArray(req.body.imagePromptLabels) ? req.body.imagePromptLabels : [];
+    const imageConfig = {
+      aspectRatio: normalizeGeminiImageAspectRatio(req.body.aspectRatio),
+      imageSize: normalizeGeminiImageSize(req.body.resolution)
+    };
     const parts = [{ text: prompt }];
 
     for (const [index, imagePromptUrl] of imagePromptUrls.entries()) {
@@ -234,7 +238,8 @@ app.post("/api/node/generate-image", async (req, res) => {
           }
         ],
         generationConfig: {
-          responseModalities: ["TEXT", "IMAGE"]
+          responseModalities: ["TEXT", "IMAGE"],
+          imageConfig
         }
       })
     });
@@ -276,6 +281,7 @@ app.post("/api/node/generate-image", async (req, res) => {
         model: req.body.model || "Nano Banana Pro",
         aspectRatio: req.body.aspectRatio || "21:9",
         resolution: req.body.resolution || "2K",
+        imageConfig,
         imagePromptCount: imagePromptUrls.length
       },
       cost,
@@ -802,6 +808,16 @@ function normalizeImageModel(model) {
   }
 
   return "gemini-3-pro-image-preview";
+}
+
+function normalizeGeminiImageAspectRatio(value) {
+  const normalized = String(value || "21:9").match(/\d+:\d+/)?.[0] || "21:9";
+  return normalizeChoice(normalized, ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], "21:9");
+}
+
+function normalizeGeminiImageSize(value) {
+  const normalized = String(value || "2K").toUpperCase();
+  return normalizeChoice(normalized, ["1K", "2K", "4K"], "2K");
 }
 
 function extensionForMime(mimeType) {
