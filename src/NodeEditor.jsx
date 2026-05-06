@@ -380,6 +380,17 @@ export default function NodeEditor({ active = true }) {
   function handlePointerMove(event) {
     const pointer = screenToScene(event.clientX, event.clientY);
 
+    if (dragState?.type === "canvas-pan") {
+      const deltaX = event.clientX - dragState.startClient.x;
+      const deltaY = event.clientY - dragState.startClient.y;
+      setViewport({
+        ...dragState.startViewport,
+        x: dragState.startViewport.x + deltaX,
+        y: dragState.startViewport.y + deltaY
+      });
+      return;
+    }
+
     if (dragState?.type === "nodes") {
       const deltaX = pointer.x - dragState.startPointer.x;
       const deltaY = pointer.y - dragState.startPointer.y;
@@ -450,6 +461,18 @@ export default function NodeEditor({ active = true }) {
     }
 
     setSelectedNodeIds([]);
+    if (event.button !== 0 && event.button !== 1) return;
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragState({
+      type: "canvas-pan",
+      startClient: {
+        x: event.clientX,
+        y: event.clientY
+      },
+      startViewport: viewport
+    });
   }
 
   function openCanvasMenu(event) {
@@ -880,7 +903,7 @@ export default function NodeEditor({ active = true }) {
 
       <div
         ref={canvasRef}
-        className="node-canvas"
+        className={`node-canvas ${dragState?.type === "canvas-pan" ? "panning" : ""}`}
         onPointerDown={startCanvasPointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishConnection}

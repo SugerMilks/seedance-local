@@ -196,6 +196,11 @@
   background: #090909;
   overscroll-behavior: contain;
   touch-action: none;
+  cursor: grab;
+}
+
+.node-canvas.panning {
+  cursor: grabbing;
 }
 
 .node-scene {
