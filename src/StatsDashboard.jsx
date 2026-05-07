@@ -18,6 +18,9 @@ const defaultPricing = {
   nanoBananaPro: {
     cost1K2K: 0.134,
     cost4K: 0.24
+  },
+  openAiImage2: {
+    mediumCost: 0.053
   }
 };
 
@@ -347,6 +350,10 @@ function estimateItemCost(item, mediaType, pricing) {
   const settings = item.settings || {};
 
   if (mediaType === "image") {
+    if (String(item.modelName || settings.model || "").toLowerCase().includes("openai")) {
+      return pricing.openAiImage2?.mediumCost || defaultPricing.openAiImage2.mediumCost;
+    }
+
     return String(settings.resolution || "").toUpperCase().includes("4K")
       ? pricing.nanoBananaPro.cost4K
       : pricing.nanoBananaPro.cost1K2K;

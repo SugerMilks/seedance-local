@@ -175,12 +175,12 @@ export default function NodeEditor() {
   const [selectedNodeIds, setSelectedNodeIds] = React.useState([]);
   const [projectName, setProjectName] = React.useState(savedDraft.projectName);
   const [projectId, setProjectId] = React.useState(savedDraft.projectId);
+  const [savedProjectName, setSavedProjectName] = React.useState(savedDraft.savedProjectName);
   const [projects, setProjects] = React.useState([]);
   const [projectMenuOpen, setProjectMenuOpen] = React.useState(false);
   const [contextMenu, setContextMenu] = React.useState(null);
   const [toolbarCollapsed, setToolbarCollapsed] = React.useState(true);
   const [saveStatus, setSaveStatus] = React.useState("");
-  const [runningNodeId, setRunningNodeId] = React.useState(null);
   const [compilingStyleNodeId, setCompilingStyleNodeId] = React.useState(null);
 
   const incomingByNode = React.useMemo(() => buildIncomingByNode(nodes, edges), [nodes, edges]);
@@ -205,13 +205,14 @@ export default function NodeEditor() {
           edges,
           viewport,
           projectId,
-          projectName
+          projectName,
+          savedProjectName
         })
       );
     } catch {
       // Local persistence should never interrupt the node editor.
     }
-  }, [nodes, edges, viewport, projectId, projectName]);
+  }, [nodes, edges, viewport, projectId, projectName, savedProjectName]);
 
   React.useEffect(() => {
     const handleResize = () => updatePortPositions();
@@ -259,7 +260,7 @@ export default function NodeEditor() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNodeIds, nodes, edges, viewport, projectId, projectName]);
+  }, [selectedNodeIds, nodes, edges, viewport, projectId, projectName, savedProjectName, selectedProjectName]);
 
   React.useEffect(() => {
     function handlePointerDown(event) {
@@ -933,7 +934,12 @@ export default function NodeEditor() {
     try {
       const response = await fetch("/api/node-projects");
       if (!response.ok) throw new Error("Could not load saved projects.");
-      setProjects(await response.json());
+      const projectList = await response.json();
+      setProjects(projectList);
+      if (projectId && !savedProjectName) {
+        const currentProject = projectList.find((project) => project.id === projectId);
+        if (currentProject?.name) setSavedProjectName(currentProject.name);
+      }
     } catch (error) {
       setSaveStatus(error.message);
     }
@@ -941,13 +947,17 @@ export default function NodeEditor() {
 
   async function saveProject() {
     try {
+      const cleanProjectName = String(projectName || "").trim() || "Untitled node project";
+      const lastSavedName = String(savedProjectName || selectedProjectName || "").trim();
+      const shouldCreateNewProject = Boolean(projectId && lastSavedName && cleanProjectName !== lastSavedName);
+
       setSaveStatus("Saving...");
       const response = await fetch("/api/node-projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: projectId,
-          name: projectName,
+          id: shouldCreateNewProject ? null : projectId,
+          name: cleanProjectName,
           nodes,
           edges,
           viewport
@@ -957,7 +967,8 @@ export default function NodeEditor() {
       if (!response.ok) throw new Error(project.error || "Could not save project.");
       setProjectId(project.id);
       setProjectName(project.name);
-      setSaveStatus("Saved");
+      setSavedProjectName(project.name);
+      setSaveStatus(shouldCreateNewProject ? "Saved as new project" : "Saved");
       await loadProjects();
     } catch (error) {
       setSaveStatus(error.message);
@@ -973,6 +984,7 @@ export default function NodeEditor() {
       if (!response.ok) throw new Error(project.error || "Could not load project.");
       setProjectId(project.id);
       setProjectName(project.name);
+      setSavedProjectName(project.name);
       setNodes(normalizeEditorNodes(project.graph.nodes || []));
       setEdges(project.graph.edges || []);
       setViewport(project.graph.viewport || { x: 0, y: 0, scale: 1 });
@@ -997,6 +1009,7 @@ export default function NodeEditor() {
       if (projectId === project.id) {
         setProjectId(null);
         setProjectName("Untitled node project");
+        setSavedProjectName(null);
       }
       setProjectMenuOpen(false);
       setSaveStatus("Project deleted");
@@ -1007,12 +1020,12 @@ export default function NodeEditor() {
 
   async function runNode(node) {
     if (node.type !== "imageModel" && node.type !== "videoModel") return;
+    if (node.data.status === "running") return;
 
     const incoming = incomingByNode[node.id] || {};
     const basePrompt = connectedText(incoming.promptIn) || node.data.prompt;
 
     try {
-      setRunningNodeId(node.id);
       updateNode(node.id, { status: "running", error: "" });
 
       if (node.type === "imageModel") {
@@ -1078,8 +1091,6 @@ export default function NodeEditor() {
       });
     } catch (error) {
       updateNode(node.id, { status: "error", error: error.message });
-    } finally {
-      setRunningNodeId(null);
     }
   }
 
@@ -1187,7 +1198,7 @@ export default function NodeEditor() {
               onStyleActivate={activateStyleNode}
               onStyleUnlock={unlockStyleNode}
               onPreviewResizeStart={startPreviewResize}
-              running={runningNodeId === node.id}
+              running={node.data.status === "running"}
               styleCompiling={compilingStyleNodeId === node.id}
               selected={selectedNodeSet.has(node.id)}
             />
@@ -1254,6 +1265,26 @@ function NodeCard({
 }) {
   const config = getNodeConfig(node.type);
   const Icon = config.icon;
+  const [editingTitle, setEditingTitle] = React.useState(false);
+  const [draftTitle, setDraftTitle] = React.useState(node.data.title || "");
+
+  React.useEffect(() => {
+    if (!editingTitle) {
+      setDraftTitle(node.data.title || "");
+    }
+  }, [node.data.title, editingTitle]);
+
+  function commitTitleEdit() {
+    const title = draftTitle.trim() || node.data.title || configTitleFallback(node.type);
+    onUpdate(node.id, { title });
+    setDraftTitle(title);
+    setEditingTitle(false);
+  }
+
+  function cancelTitleEdit() {
+    setDraftTitle(node.data.title || "");
+    setEditingTitle(false);
+  }
 
   return (
     <article
@@ -1265,7 +1296,45 @@ function NodeCard({
       <div className="node-title">
         <span className="node-title-label">
           <Icon size={15} />
-          {node.data.title}
+          {editingTitle ? (
+            <input
+              className="node-title-input"
+              value={draftTitle}
+              autoFocus
+              onPointerDown={(event) => event.stopPropagation()}
+              onFocus={(event) => event.target.select()}
+              onChange={(event) => setDraftTitle(event.target.value)}
+              onBlur={commitTitleEdit}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitTitleEdit();
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelTitleEdit();
+                }
+              }}
+            />
+          ) : (
+            <span
+              className="node-title-name"
+              role="button"
+              tabIndex={0}
+              title="Rename node"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => setEditingTitle(true)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setEditingTitle(true);
+                }
+              }}
+            >
+              {node.data.title}
+            </span>
+          )}
         </span>
         <button onClick={() => onRemove(node.id)} title="Remove node">
           <X size={14} />
@@ -1607,6 +1676,7 @@ function NodeBody({
         <NodeRow label="Model">
           <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
             <option>Nano Banana Pro</option>
+            <option>OpenAI Image 2</option>
           </select>
         </NodeRow>
         <NodeRow label="Prompt" inputPort={promptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -1852,6 +1922,10 @@ function createDefaultNodeData(type, label, count) {
     aspectRatio: "16:9 (Landscape)",
     generateAudio: true
   };
+}
+
+function configTitleFallback(type) {
+  return nodeCatalog.find((item) => item.type === type)?.label || "Node";
 }
 
 function mediaAccept(type) {
@@ -2107,7 +2181,8 @@ function loadNodeEditorDraft() {
     edges: initialEdges,
     viewport: { x: 0, y: 0, scale: 1 },
     projectId: null,
-    projectName: "Untitled node project"
+    projectName: "Untitled node project",
+    savedProjectName: null
   };
 
   try {
@@ -2118,7 +2193,8 @@ function loadNodeEditorDraft() {
       edges: parsed.edges,
       viewport: parsed.viewport || fallback.viewport,
       projectId: parsed.projectId || null,
-      projectName: parsed.projectName || fallback.projectName
+      projectName: parsed.projectName || fallback.projectName,
+      savedProjectName: parsed.savedProjectName || null
     };
   } catch {
     return fallback;
@@ -2127,14 +2203,25 @@ function loadNodeEditorDraft() {
 
 function normalizeEditorNodes(nodes = []) {
   return nodes.map((node) => {
-    if (node.type !== "style" || !isLegacyDirectionNode(node)) return node;
+    const normalizedNode =
+      node.type === "style" && isLegacyDirectionNode(node)
+        ? {
+            ...node,
+            type: "direction",
+            data: {
+              ...node.data,
+              title: directionTitleFromLegacy(node.data?.title)
+            }
+          }
+        : node;
+
+    if (normalizedNode.data?.status !== "running") return normalizedNode;
 
     return {
-      ...node,
-      type: "direction",
+      ...normalizedNode,
       data: {
-        ...node.data,
-        title: directionTitleFromLegacy(node.data?.title)
+        ...normalizedNode.data,
+        status: normalizedNode.data.resultUrl ? "complete" : "ready"
       }
     };
   });

@@ -24,6 +24,7 @@ const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_
 const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.2419);
 const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.134);
 const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.24);
+const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     falKeyConfigured: Boolean(process.env.FAL_KEY),
+    openAiKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
     outputDirectory: outputsDir
   });
 });
@@ -80,6 +82,10 @@ app.get("/api/stats", async (_req, res) => {
       nanoBananaPro: {
         cost1K2K: nanoBananaCost1K2K,
         cost4K: nanoBananaCost4K,
+        currency: "USD"
+      },
+      openAiImage2: {
+        mediumCost: openAiImage2MediumCost,
         currency: "USD"
       }
     }
@@ -192,18 +198,79 @@ app.post("/api/node/upload-style-collage", upload.single("asset"), async (req, r
 
 app.post("/api/node/generate-image", async (req, res) => {
   try {
-    if (!process.env.GOOGLE_API_KEY) {
-      return res.status(400).json({ error: "Missing GOOGLE_API_KEY in .env." });
-    }
-
     const prompt = String(req.body.prompt || "").trim();
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required." });
     }
 
-    const model = normalizeImageModel(req.body.model);
+    const selectedModel = resolveImageModel(req.body.model);
     const imagePromptUrls = Array.isArray(req.body.imagePromptUrls) ? req.body.imagePromptUrls.filter(isLocalAssetUrl) : [];
     const imagePromptLabels = Array.isArray(req.body.imagePromptLabels) ? req.body.imagePromptLabels : [];
+
+    if (selectedModel.provider === "openai") {
+      if (!process.env.OPENAI_API_KEY) {
+        return res.status(400).json({ error: "Missing OPENAI_API_KEY in .env." });
+      }
+
+      const openAiImage = await generateOpenAiImage({
+        prompt,
+        imagePromptUrls,
+        imagePromptLabels,
+        aspectRatio: req.body.aspectRatio,
+        resolution: req.body.resolution
+      });
+      const extension = extensionForMime(openAiImage.mimeType);
+      const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-openai-image-2${extension}`;
+      await writeFile(path.join(outputsDir, fileName), openAiImage.bytes);
+
+      const cost = estimateOpenAiImage2Cost({
+        resolution: req.body.resolution,
+        size: openAiImage.size,
+        quality: openAiImage.quality
+      });
+      await appendHistory({
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        mediaType: "image",
+        provider: "OpenAI",
+        modelName: selectedModel.displayName,
+        endpoint: selectedModel.id,
+        mode: imagePromptUrls.length ? "Image edit with references" : "Image generation",
+        prompt,
+        submittedPrompt: openAiImage.submittedPrompt,
+        project: projectFromBody(req.body),
+        node: nodeFromBody(req.body),
+        settings: {
+          model: req.body.model || selectedModel.displayName,
+          aspectRatio: req.body.aspectRatio || "21:9",
+          resolution: req.body.resolution || "2K",
+          imageSize: openAiImage.size,
+          quality: openAiImage.quality,
+          imagePromptCount: imagePromptUrls.length
+        },
+        cost,
+        localImage: `/outputs/${fileName}`,
+        outputFileName: fileName,
+        outputBytes: openAiImage.bytes.length,
+        text: openAiImage.revisedPrompt || ""
+      });
+
+      return res.json({
+        text: openAiImage.revisedPrompt || "",
+        cost,
+        image: {
+          localUrl: `/outputs/${fileName}`,
+          fileName,
+          mimeType: openAiImage.mimeType
+        }
+      });
+    }
+
+    if (!process.env.GOOGLE_API_KEY) {
+      return res.status(400).json({ error: "Missing GOOGLE_API_KEY in .env." });
+    }
+
+    const model = selectedModel.id;
     const imageConfig = {
       aspectRatio: normalizeGeminiImageAspectRatio(req.body.aspectRatio),
       imageSize: normalizeGeminiImageSize(req.body.resolution)
@@ -270,7 +337,7 @@ app.post("/api/node/generate-image", async (req, res) => {
       createdAt: new Date().toISOString(),
       mediaType: "image",
       provider: "Google",
-      modelName: "Nano Banana Pro",
+      modelName: selectedModel.displayName,
       endpoint: model,
       mode: "Image generation",
       prompt,
@@ -278,7 +345,7 @@ app.post("/api/node/generate-image", async (req, res) => {
       project: projectFromBody(req.body),
       node: nodeFromBody(req.body),
       settings: {
-        model: req.body.model || "Nano Banana Pro",
+        model: req.body.model || selectedModel.displayName,
         aspectRatio: req.body.aspectRatio || "21:9",
         resolution: req.body.resolution || "2K",
         imageConfig,
@@ -752,6 +819,21 @@ function estimateImageCost({ resolution }) {
   };
 }
 
+function estimateOpenAiImage2Cost({ resolution, size, quality }) {
+  return {
+    amountUsd: roundCurrency(openAiImage2MediumCost),
+    currency: "USD",
+    unitRateUsd: openAiImage2MediumCost,
+    units: 1,
+    unit: "image",
+    mediaType: "image",
+    resolution,
+    size,
+    quality,
+    pricingBasis: "OpenAI GPT Image 2 medium image output estimate"
+  };
+}
+
 function durationToSeconds(duration) {
   if (duration === "auto") return 15;
   const match = String(duration || "15").match(/\d+/);
@@ -802,12 +884,21 @@ async function writeNodeProjects(projects) {
   await writeFile(nodeProjectsPath, JSON.stringify(projects, null, 2));
 }
 
-function normalizeImageModel(model) {
-  if (String(model || "").toLowerCase().includes("banana")) {
-    return "gemini-3-pro-image-preview";
+function resolveImageModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("openai") || normalized.includes("gpt-image-2") || normalized.includes("image 2")) {
+    return {
+      provider: "openai",
+      displayName: "OpenAI Image 2",
+      id: "gpt-image-2"
+    };
   }
 
-  return "gemini-3-pro-image-preview";
+  return {
+    provider: "google",
+    displayName: "Nano Banana Pro",
+    id: "gemini-3-pro-image-preview"
+  };
 }
 
 function normalizeGeminiImageAspectRatio(value) {
@@ -818,6 +909,134 @@ function normalizeGeminiImageAspectRatio(value) {
 function normalizeGeminiImageSize(value) {
   const normalized = String(value || "2K").toUpperCase();
   return normalizeChoice(normalized, ["1K", "2K", "4K"], "2K");
+}
+
+async function generateOpenAiImage({ prompt, imagePromptUrls, imagePromptLabels, aspectRatio, resolution }) {
+  const imageInputs = [];
+
+  for (const [index, imagePromptUrl] of imagePromptUrls.entries()) {
+    const asset = await readLocalAsset(imagePromptUrl);
+    if (!asset.mimeType.startsWith("image/")) continue;
+    imageInputs.push({
+      ...asset,
+      label: cleanImagePromptLabel(imagePromptLabels[index])
+    });
+  }
+
+  const size = normalizeOpenAiImageSize({ aspectRatio, resolution });
+  const quality = normalizeOpenAiImageQuality(process.env.OPENAI_IMAGE_2_QUALITY || "medium");
+  const submittedPrompt = promptWithReferenceLabels(prompt, imageInputs);
+  const endpoint = imageInputs.length ? "https://api.openai.com/v1/images/edits" : "https://api.openai.com/v1/images/generations";
+  const requestOptions = imageInputs.length
+    ? openAiImageEditRequest({ prompt: submittedPrompt, imageInputs, size, quality })
+    : openAiImageGenerationRequest({ prompt: submittedPrompt, size, quality });
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      ...requestOptions.headers
+    },
+    body: requestOptions.body
+  });
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.error?.message || "OpenAI image generation failed.");
+  }
+
+  const image = data?.data?.[0];
+  const base64Image = image?.b64_json || image?.b64;
+  if (!base64Image) {
+    throw new Error("OpenAI returned no image data.");
+  }
+
+  return {
+    bytes: Buffer.from(base64Image, "base64"),
+    mimeType: mimeForOpenAiOutputFormat("png"),
+    size,
+    quality,
+    submittedPrompt,
+    revisedPrompt: image?.revised_prompt || ""
+  };
+}
+
+function openAiImageGenerationRequest({ prompt, size, quality }) {
+  return {
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-image-2",
+      prompt,
+      size,
+      quality,
+      output_format: "png"
+    })
+  };
+}
+
+function openAiImageEditRequest({ prompt, imageInputs, size, quality }) {
+  const form = new FormData();
+  form.append("model", "gpt-image-2");
+  form.append("prompt", prompt);
+  form.append("size", size);
+  form.append("quality", quality);
+  form.append("output_format", "png");
+
+  imageInputs.slice(0, 16).forEach((image, index) => {
+    const extension = extensionForMime(image.mimeType);
+    const fileName = `${image.label || `reference-${index + 1}`}${extension}`;
+    form.append("image[]", new File([image.buffer], fileName, { type: image.mimeType }));
+  });
+
+  return {
+    headers: {},
+    body: form
+  };
+}
+
+function promptWithReferenceLabels(prompt, imageInputs) {
+  const labels = imageInputs.map((image, index) => image.label || `Reference ${index + 1}`).filter(Boolean);
+  if (!labels.length) return prompt;
+  return `${prompt}\n\nReference image labels: ${labels.join(", ")}`;
+}
+
+function normalizeOpenAiImageQuality(value) {
+  return normalizeChoice(String(value || "medium").toLowerCase(), ["low", "medium", "high", "auto"], "medium");
+}
+
+function normalizeOpenAiImageSize({ aspectRatio, resolution }) {
+  const ratio = String(aspectRatio || "21:9").match(/\d+:\d+/)?.[0] || "21:9";
+  const normalizedResolution = String(resolution || "2K").toUpperCase();
+  const sizeMap = {
+    "1K": {
+      "21:9": "1344x576",
+      "16:9": "1280x720",
+      "1:1": "1024x1024",
+      "9:16": "720x1280"
+    },
+    "2K": {
+      "21:9": "2048x880",
+      "16:9": "2048x1152",
+      "1:1": "2048x2048",
+      "9:16": "1152x2048"
+    },
+    "4K": {
+      "21:9": "3840x1648",
+      "16:9": "3840x2160",
+      "1:1": "2880x2880",
+      "9:16": "2160x3840"
+    }
+  };
+
+  return sizeMap[normalizedResolution]?.[ratio] || sizeMap["2K"]["21:9"];
+}
+
+function mimeForOpenAiOutputFormat(format) {
+  if (format === "jpeg") return "image/jpeg";
+  if (format === "webp") return "image/webp";
+  return "image/png";
 }
 
 function extensionForMime(mimeType) {
