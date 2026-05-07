@@ -1,6 +1,7 @@
 import React from "react";
 import {
   ChevronDown,
+  Compass,
   FileAudio,
   FileImage,
   Film,
@@ -23,6 +24,7 @@ import "./nodeEditor.css";
 const nodeCatalog = [
   { type: "text", label: "Text", icon: Type },
   { type: "image", label: "Image", icon: FileImage },
+  { type: "direction", label: "Direction", icon: Compass },
   { type: "style", label: "Style", icon: Palette },
   { type: "video", label: "Video", icon: Video },
   { type: "audio", label: "Audio", icon: FileAudio },
@@ -183,6 +185,7 @@ export default function NodeEditor() {
 
   const incomingByNode = React.useMemo(() => buildIncomingByNode(nodes, edges), [nodes, edges]);
   const connectedPortKeys = React.useMemo(() => buildConnectedPortKeys(edges), [edges]);
+  const directionStyleLockActive = React.useMemo(() => hasConnectedDirectionNode(nodes, edges), [nodes, edges]);
   const selectedNodeSet = React.useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const selectedProjectName = projects.find((project) => project.id === projectId)?.name;
 
@@ -433,7 +436,7 @@ export default function NodeEditor() {
       for (const file of files) {
         const form = new FormData();
         form.append("asset", file);
-        form.append("nodeType", "style");
+        form.append("nodeType", "direction");
 
         const response = await fetch("/api/node/upload-asset", {
           method: "POST",
@@ -768,23 +771,41 @@ export default function NodeEditor() {
       };
 
       if (to.nodeId !== draftEdge.from.nodeId) {
-        if (!canCreateEdge(draftEdge.from, to)) {
-          setSaveStatus("Style output connects to image prompts after locking");
+        const connectionError = getConnectionError(draftEdge.from, to);
+        if (connectionError) {
+          setSaveStatus(connectionError);
           setDraftEdge(null);
           stopNodeDrag();
           return;
         }
 
+        const source = nodes.find((node) => node.id === draftEdge.from.nodeId);
+        const targetNode = nodes.find((node) => node.id === to.nodeId);
+
         pushUndoSnapshot();
-        setEdges((current) => [
-          ...current.filter((edge) => !(edge.from.nodeId === draftEdge.from.nodeId && edge.from.port === draftEdge.from.port && edge.to.nodeId === to.nodeId && edge.to.port === to.port)),
-          {
-            id: `edge-${Date.now()}`,
-            from: draftEdge.from,
-            to,
-            color: draftEdge.color
+        setEdges((current) => {
+          let nextEdges = current.filter(
+            (edge) => !(edge.from.nodeId === draftEdge.from.nodeId && edge.from.port === draftEdge.from.port && edge.to.nodeId === to.nodeId && edge.to.port === to.port)
+          );
+
+          if (source?.type === "direction") {
+            nextEdges = nextEdges.filter((edge) => nodes.find((node) => node.id === edge.from.nodeId)?.type !== "style");
           }
-        ]);
+
+          if (source?.type === "style" && targetNode?.type === "imageModel") {
+            nextEdges = nextEdges.filter((edge) => nodes.find((node) => node.id === edge.from.nodeId)?.type !== "direction");
+          }
+
+          return [
+            ...nextEdges,
+            {
+              id: `edge-${Date.now()}`,
+              from: draftEdge.from,
+              to,
+              color: draftEdge.color
+            }
+          ];
+        });
       }
     }
 
@@ -793,19 +814,34 @@ export default function NodeEditor() {
   }
 
   function canCreateEdge(from, to) {
+    return !getConnectionError(from, to);
+  }
+
+  function getConnectionError(from, to) {
     const source = nodes.find((node) => node.id === from.nodeId);
     const target = nodes.find((node) => node.id === to.nodeId);
 
+    if (!source || !target) return "Choose a valid connection";
+
+    if (source.type === "direction") {
+      if (!source.data.activated || !source.data.resultUrl) return "Lock Direction to enable STYLE.png output";
+      if ((target.type === "imageModel" && to.port === "imagePromptIn") || (target.type === "preview" && to.port === "sourceIn")) return "";
+      return "Direction connects to image prompts or previews";
+    }
+
     if (source?.type === "style") {
-      if (!source.data.activated || !source.data.resultUrl) return false;
-      return Boolean((target?.type === "imageModel" && to.port === "imagePromptIn") || (target?.type === "preview" && to.port === "sourceIn"));
+      if (directionStyleLockActive) return "Direction is connected, so Style nodes are disabled";
+      if ((source.data.stylePreset || "None") === "None") return "Choose a Style preset before connecting";
+      if (target.type === "imageModel" && to.port === "styleIn") return "";
+      return "Style presets connect to the Image Model style input";
     }
 
     if (target?.type === "preview") {
-      return ["image", "video", "imageModel", "videoModel"].includes(source?.type);
+      if (["image", "video", "imageModel", "videoModel", "direction"].includes(source?.type)) return "";
+      return "Preview accepts image and video sources";
     }
 
-    return true;
+    return "";
   }
 
   function getPortPoint(nodeId, port) {
@@ -931,7 +967,7 @@ export default function NodeEditor() {
       if (!response.ok) throw new Error(project.error || "Could not load project.");
       setProjectId(project.id);
       setProjectName(project.name);
-      setNodes(project.graph.nodes || []);
+      setNodes(normalizeEditorNodes(project.graph.nodes || []));
       setEdges(project.graph.edges || []);
       setViewport(project.graph.viewport || { x: 0, y: 0, scale: 1 });
       setSelectedNodeIds([]);
@@ -975,7 +1011,8 @@ export default function NodeEditor() {
 
       if (node.type === "imageModel") {
         const imagePromptItems = connectedImagePromptItems(incoming.imagePromptIn);
-        const prompt = buildEffectiveImagePrompt(basePrompt, incoming.imagePromptIn, node.data.aspectRatio);
+        const stylePromptItems = incoming.styleIn || [];
+        const prompt = buildEffectiveImagePrompt(basePrompt, [...(incoming.imagePromptIn || []), ...stylePromptItems], node.data.aspectRatio);
         const response = await fetch("/api/node/generate-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1146,6 +1183,7 @@ export default function NodeEditor() {
               onPreviewResizeStart={startPreviewResize}
               running={runningNodeId === node.id}
               styleCompiling={compilingStyleNodeId === node.id}
+              directionStyleLockActive={directionStyleLockActive}
               selected={selectedNodeSet.has(node.id)}
             />
           ))}
@@ -1207,6 +1245,7 @@ function NodeCard({
   onPreviewResizeStart,
   running,
   styleCompiling,
+  directionStyleLockActive,
   selected
 }) {
   const config = getNodeConfig(node.type);
@@ -1245,6 +1284,7 @@ function NodeCard({
         onStyleUnlock={onStyleUnlock}
         onPreviewResizeStart={onPreviewResizeStart}
         styleCompiling={styleCompiling}
+        directionStyleLockActive={directionStyleLockActive}
       />
     </article>
   );
@@ -1333,8 +1373,8 @@ function StyleCollage({ images, locked, onRemove, onDropImages }) {
   if (!images.length) {
     return (
       <div className="style-collage empty" onDragOver={allowFileDrop} onDrop={handleDrop}>
-        <Palette size={24} />
-        <span>Drop style images here</span>
+        <Compass size={24} />
+        <span>Drop direction images here</span>
       </div>
     );
   }
@@ -1343,7 +1383,7 @@ function StyleCollage({ images, locked, onRemove, onDropImages }) {
     <div className={`style-collage count-${images.length} ${locked ? "locked" : ""}`} onDragOver={allowFileDrop} onDrop={handleDrop}>
       {images.map((image) => (
         <div className="style-collage-cell" key={image.id}>
-          <img src={image.localUrl} alt={image.fileName || "Style reference"} />
+          <img src={image.localUrl} alt={image.fileName || "Direction reference"} />
           {!locked && (
             <button onClick={() => onRemove(image.id)} title="Remove image">
               <X size={12} />
@@ -1377,7 +1417,8 @@ function NodeBody({
   onStyleActivate,
   onStyleUnlock,
   onPreviewResizeStart,
-  styleCompiling
+  styleCompiling,
+  directionStyleLockActive
 }) {
   const config = getNodeConfig(node.type);
   const outputPort = config.output[0];
@@ -1417,7 +1458,7 @@ function NodeBody({
     );
   }
 
-  if (node.type === "style") {
+  if (node.type === "direction") {
     const styleImages = Array.isArray(node.data.styleImages) ? node.data.styleImages : [];
     const canAddImages = !node.data.locked && styleImages.length < maxStyleImages;
     return (
@@ -1425,7 +1466,7 @@ function NodeBody({
         {node.data.activated && node.data.resultUrl ? (
           <OutputPortRow node={node} port={outputPort} label="STYLE.png" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         ) : (
-          <div className="style-output-placeholder">Lock style to enable output</div>
+          <div className="style-output-placeholder">Lock direction to enable output</div>
         )}
 
         <StyleCollage
@@ -1478,7 +1519,7 @@ function NodeBody({
             className={`style-lock-button ${node.data.locked ? "locked" : ""}`}
             onClick={() => (node.data.locked ? onStyleUnlock(node.id) : onStyleActivate(node))}
             disabled={styleCompiling || (!node.data.locked && !styleImages.length)}
-            title={node.data.locked ? "Unlock style" : "Compile STYLE.png"}
+            title={node.data.locked ? "Unlock direction" : "Compile STYLE.png"}
           >
             {node.data.locked ? <Lock size={16} /> : <Unlock size={16} />}
           </button>
@@ -1491,6 +1532,41 @@ function NodeBody({
         {node.data.fileName && <small>{node.data.fileName}</small>}
         {node.data.status === "uploading" && <small className="upload-status">Uploading...</small>}
         {node.data.error && <small className="upload-error">{node.data.error}</small>}
+      </div>
+    );
+  }
+
+  if (node.type === "style") {
+    const selectedPreset = node.data.stylePreset || "None";
+    const styleSelected = selectedPreset !== "None";
+
+    return (
+      <div className={`node-body style-only-node-body ${directionStyleLockActive ? "disabled" : ""}`}>
+        {directionStyleLockActive ? (
+          <div className="style-output-placeholder">Direction connected</div>
+        ) : styleSelected ? (
+          <OutputPortRow
+            node={node}
+            port={outputPort}
+            label={selectedPreset}
+            onConnectStart={onConnectStart}
+            onDisconnectInput={onDisconnectInput}
+            connectedPortKeys={connectedPortKeys}
+          />
+        ) : (
+          <div className="style-output-placeholder">Choose style to enable output</div>
+        )}
+
+        <div className="style-preset-row">
+          <span>Style</span>
+          <select disabled={directionStyleLockActive} value={selectedPreset} onChange={(event) => onUpdate(node.id, { stylePreset: event.target.value })}>
+            {stylePresetNames.map((presetName) => (
+              <option key={presetName}>{presetName}</option>
+            ))}
+          </select>
+        </div>
+
+        {directionStyleLockActive && <small className="style-disabled-note">Disabled while Direction is connected.</small>}
       </div>
     );
   }
@@ -1516,11 +1592,13 @@ function NodeBody({
   if (node.type === "imageModel") {
     const promptValue = connectedText(incoming.promptIn) || node.data.prompt;
     const promptConnected = Boolean(connectedText(incoming.promptIn));
-    const effectivePromptValue = buildEffectiveImagePrompt(promptValue, incoming.imagePromptIn, node.data.aspectRatio);
+    const effectivePromptValue = buildEffectiveImagePrompt(promptValue, [...(incoming.imagePromptIn || []), ...(incoming.styleIn || [])], node.data.aspectRatio);
     const promptHasGeneratedAdditions = effectivePromptValue !== promptValue;
     const imagePromptLabel = connectedSummary(incoming.imagePromptIn, "Add file");
+    const stylePromptLabel = connectedSummary(incoming.styleIn, "Add style");
     const promptPort = config.input.find((port) => port.id === "promptIn");
     const imagePromptPort = config.input.find((port) => port.id === "imagePromptIn");
+    const stylePort = config.input.find((port) => port.id === "styleIn");
     return (
       <div className="node-body model-node-body">
         <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} type="image" status={node.data.status} error={node.data.error} />
@@ -1546,6 +1624,9 @@ function NodeBody({
           <summary>Settings</summary>
           <NodeRow label="Image Prompt" inputPort={imagePromptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={imagePromptLabel !== "Add file" ? "connected-field" : ""}>{imagePromptLabel}</button>
+          </NodeRow>
+          <NodeRow label="Style" inputPort={stylePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+            <button className={stylePromptLabel !== "Add style" ? "connected-field" : ""}>{stylePromptLabel}</button>
           </NodeRow>
           <NodeRow label="Aspect Ratio">
             <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
@@ -1684,10 +1765,15 @@ function getNodeConfig(type) {
       input: [],
       output: [{ id: "imageOut", label: "Image", color: portColors.image }]
     },
+    direction: {
+      icon: Compass,
+      input: [],
+      output: [{ id: "styleOut", label: "STYLE.png", color: portColors.image }]
+    },
     style: {
       icon: Palette,
       input: [],
-      output: [{ id: "styleOut", label: "STYLE.png", color: portColors.image }]
+      output: [{ id: "styleOut", label: "Style", color: portColors.prompt }]
     },
     video: {
       icon: Video,
@@ -1708,7 +1794,8 @@ function getNodeConfig(type) {
       icon: ImagePlus,
       input: [
         { id: "promptIn", label: "Prompt", color: portColors.prompt },
-        { id: "imagePromptIn", label: "Image Prompt", color: portColors.image }
+        { id: "imagePromptIn", label: "Image Prompt", color: portColors.image },
+        { id: "styleIn", label: "Style", color: portColors.prompt }
       ],
       output: [{ id: "imageOut", label: "Image", color: portColors.image }]
     },
@@ -1735,7 +1822,7 @@ function createDefaultNodeData(type, label, count) {
   if (type === "text") return { title, text: "" };
   if (type === "image" || type === "video" || type === "audio") return { title };
   if (type === "preview") return { title, previewScale: 1 };
-  if (type === "style") {
+  if (type === "direction") {
     return {
       title,
       styleImages: [],
@@ -1748,6 +1835,7 @@ function createDefaultNodeData(type, label, count) {
       hiddenPrompt: stylePromptSuffix
     };
   }
+  if (type === "style") return { title, stylePreset: "None" };
   if (type === "imageModel") {
     return {
       title,
@@ -1809,6 +1897,11 @@ function buildConnectedPortKeys(edges) {
   return keys;
 }
 
+function hasConnectedDirectionNode(nodes, edges) {
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  return edges.some((edge) => nodeMap.get(edge.from.nodeId)?.type === "direction");
+}
+
 function connectedText(items = []) {
   return items
     .map(({ source }) => {
@@ -1847,13 +1940,14 @@ function connectedImagePromptItems(items = []) {
       if (!source.data.resultUrl) return null;
       return {
         url: source.data.resultUrl,
-        label: source.type === "style" ? "STYLE.png" : sourceLabel(source)
+        label: source.type === "direction" ? "STYLE.png" : sourceLabel(source)
       };
     })
     .filter(Boolean);
 }
 
 function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
+  const hasDirectionReference = items.some(({ source }) => source.type === "direction" && source.data.resultUrl);
   const styleInstructions = items
     .flatMap(({ source }) => stylePromptPiecesForSource(source))
     .filter(Boolean);
@@ -1861,7 +1955,7 @@ function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
   if (!styleInstructions.length) return prompt;
 
   const ratio = extractAspectRatio(aspectRatio);
-  const aspectInstruction = ratio
+  const aspectInstruction = hasDirectionReference && ratio
     ? `Generate the final image in the Image Model node's selected ${ratio} aspect ratio. Do not copy STYLE.png's collage layout or aspect ratio into the final image.`
     : "";
 
@@ -1869,7 +1963,12 @@ function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
 }
 
 function stylePromptPiecesForSource(source) {
-  if (source.type !== "style" || !source.data.activated || !source.data.resultUrl) return [];
+  if (source.type === "style") {
+    const selectedPreset = source.data.stylePreset || "None";
+    return [stylePresetPrompts[selectedPreset] || ""].filter(Boolean);
+  }
+
+  if (source.type !== "direction" || !source.data.activated || !source.data.resultUrl) return [];
 
   const selectedPreset = source.data.stylePreset || "None";
   const selectedShot = source.data.shotPreset || "None";
@@ -1892,7 +1991,8 @@ function connectedSummary(items = [], fallback) {
 }
 
 function sourceLabel(source) {
-  if (source.type === "style" && source.data.resultUrl) return "STYLE.png";
+  if (source.type === "direction" && source.data.resultUrl) return "STYLE.png";
+  if (source.type === "style") return (source.data.stylePreset || "None") === "None" ? "Style" : source.data.stylePreset;
   if (source.data.resultUrl) return source.data.resultUrl.split("/").pop();
   if (source.data.fileName) return source.data.fileName;
   return source.data.title || source.type;
@@ -2006,7 +2106,7 @@ function cloneEdge(edge) {
 
 function loadNodeEditorDraft() {
   const fallback = {
-    nodes: initialNodes,
+    nodes: normalizeEditorNodes(initialNodes),
     edges: initialEdges,
     viewport: { x: 0, y: 0, scale: 1 },
     projectId: null,
@@ -2017,7 +2117,7 @@ function loadNodeEditorDraft() {
     const parsed = JSON.parse(localStorage.getItem(nodeDraftStorageKey) || "null");
     if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return fallback;
     return {
-      nodes: parsed.nodes,
+      nodes: normalizeEditorNodes(parsed.nodes),
       edges: parsed.edges,
       viewport: parsed.viewport || fallback.viewport,
       projectId: parsed.projectId || null,
@@ -2026,6 +2126,31 @@ function loadNodeEditorDraft() {
   } catch {
     return fallback;
   }
+}
+
+function normalizeEditorNodes(nodes = []) {
+  return nodes.map((node) => {
+    if (node.type !== "style" || !isLegacyDirectionNode(node)) return node;
+
+    return {
+      ...node,
+      type: "direction",
+      data: {
+        ...node.data,
+        title: directionTitleFromLegacy(node.data?.title)
+      }
+    };
+  });
+}
+
+function isLegacyDirectionNode(node) {
+  const data = node.data || {};
+  return Array.isArray(data.styleImages) || "activated" in data || "locked" in data || "hiddenPrompt" in data || "shotPreset" in data || "lensPreset" in data || "typePreset" in data;
+}
+
+function directionTitleFromLegacy(title) {
+  if (!title) return "Direction";
+  return String(title).replace(/^Style\b/, "Direction");
 }
 
 function roundPreviewScale(value) {

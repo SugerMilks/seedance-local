@@ -289,8 +289,12 @@
   width: 365px;
 }
 
-.node-card.style {
+.node-card.direction {
   width: 335px;
+}
+
+.node-card.style {
+  width: 300px;
 }
 
 .node-card.videoModel {
@@ -661,6 +665,29 @@
 
 .style-node-body .upload-error {
   color: #f3a288;
+}
+
+.style-only-node-body {
+  display: grid;
+  gap: 12px;
+  padding: 12px 18px 18px;
+}
+
+.style-only-node-body.disabled {
+  opacity: 0.68;
+}
+
+.style-only-node-body .style-preset-row {
+  grid-template-columns: 54px 1fr;
+}
+
+.style-only-node-body select:disabled {
+  cursor: not-allowed;
+}
+
+.style-disabled-note {
+  color: rgba(244, 240, 232, 0.46);
+  font-size: 12px;
 }
 
 .preview-node-body {
