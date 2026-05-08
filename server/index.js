@@ -171,30 +171,38 @@ app.post("/api/node/upload-asset", upload.single("asset"), async (req, res) => {
 });
 
 app.post("/api/node/upload-style-collage", upload.single("asset"), async (req, res) => {
+  return handleTransferCollageUpload(req, res);
+});
+
+app.post("/api/node/upload-transfer-collage", upload.single("asset"), async (req, res) => {
+  return handleTransferCollageUpload(req, res);
+});
+
+async function handleTransferCollageUpload(req, res) {
   if (!req.file) {
-    return res.status(400).json({ error: "No style collage uploaded." });
+    return res.status(400).json({ error: "No transfer collage uploaded." });
   }
 
-  const nodeId = safePathSegment(req.body.nodeId || "style");
-  const styleDir = path.join(uploadsDir, "styles", nodeId);
-  const storedFileName = path.join("styles", nodeId, "STYLE.png");
-  const targetPath = path.join(styleDir, "STYLE.png");
+  const nodeId = safePathSegment(req.body.nodeId || "transfer");
+  const transferDir = path.join(uploadsDir, "transfers", nodeId);
+  const storedFileName = path.join("transfers", nodeId, "TRANSFER.png");
+  const targetPath = path.join(transferDir, "TRANSFER.png");
 
-  await mkdir(styleDir, { recursive: true });
+  await mkdir(transferDir, { recursive: true });
   await rm(targetPath, { force: true });
   await rename(req.file.path, targetPath);
 
   res.json({
     asset: {
       localUrl: `/uploads/${storedFileName.split(path.sep).join("/")}`,
-      fileName: "STYLE.png",
+      fileName: "TRANSFER.png",
       storedFileName: storedFileName.split(path.sep).join("/"),
       mimeType: "image/png",
       size: req.file.size,
       mediaType: "image"
     }
   });
-});
+}
 
 app.post("/api/node/generate-image", async (req, res) => {
   try {
@@ -714,9 +722,9 @@ function cleanImagePromptLabel(value) {
 }
 
 function safePathSegment(value) {
-  return String(value || "style")
+  return String(value || "transfer")
     .replace(/[^A-Za-z0-9_-]/g, "-")
-    .slice(0, 80) || "style";
+    .slice(0, 80) || "transfer";
 }
 
 function uniqueReferenceName(value, usedNames) {

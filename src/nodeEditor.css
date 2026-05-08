@@ -289,10 +289,11 @@
   width: 365px;
 }
 
-.node-card.direction {
+.node-card.transfer {
   width: 335px;
 }
 
+.node-card.camera,
 .node-card.style {
   width: 300px;
 }

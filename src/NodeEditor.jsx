@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  Camera,
   ChevronDown,
   Compass,
   FileAudio,
@@ -24,8 +25,9 @@ import "./nodeEditor.css";
 const nodeCatalog = [
   { type: "text", label: "Text", icon: Type },
   { type: "image", label: "Image", icon: FileImage },
-  { type: "direction", label: "Direction", icon: Compass },
+  { type: "camera", label: "Camera", icon: Camera },
   { type: "style", label: "Style", icon: Palette },
+  { type: "transfer", label: "Transfer", icon: Compass },
   { type: "video", label: "Video", icon: Video },
   { type: "audio", label: "Audio", icon: FileAudio },
   { type: "preview", label: "Preview", icon: MonitorPlay },
@@ -36,13 +38,17 @@ const nodeCatalog = [
 const portColors = {
   prompt: "#f0c83b",
   image: "#3d85ff",
+  camera: "#ef4444",
+  style: "#9b5cff",
+  transfer: "#ff4fb3",
   video: "#58ce63",
-  audio: "#ff8b35"
+  audio: "#ff8b35",
+  preview: "#8d8d8d"
 };
 
-const maxStyleImages = 6;
-const stylePromptSuffix =
-  "Only use the uploaded collage reference images labeled STYLE.png as a style reference for the color grading, grain style, and camera qualities. The generated image should NOT take content from the collage reference image labeled STYLE.png directly, only use the collage references as a style transfer guide.";
+const maxTransferImages = 6;
+const transferPromptSuffix =
+  "Only use the uploaded collage reference image labeled TRANSFER.png as a transfer reference for color grading, grain style, texture, lighting, and camera qualities. The generated image should NOT take content, layout, subjects, or composition from TRANSFER.png directly; only use it as a visual transfer guide.";
 const stylePresetPrompts = {
   None: "",
   Cinematic:
@@ -181,7 +187,7 @@ export default function NodeEditor() {
   const [contextMenu, setContextMenu] = React.useState(null);
   const [toolbarCollapsed, setToolbarCollapsed] = React.useState(true);
   const [saveStatus, setSaveStatus] = React.useState("");
-  const [compilingStyleNodeId, setCompilingStyleNodeId] = React.useState(null);
+  const [compilingTransferNodeId, setCompilingTransferNodeId] = React.useState(null);
 
   const incomingByNode = React.useMemo(() => buildIncomingByNode(nodes, edges), [nodes, edges]);
   const connectedPortKeys = React.useMemo(() => buildConnectedPortKeys(edges), [edges]);
@@ -419,13 +425,13 @@ export default function NodeEditor() {
     }
   }
 
-  async function uploadStyleImages(node, fileList) {
+  async function uploadTransferImages(node, fileList) {
     if (node.data.locked) return;
 
-    const existingImages = Array.isArray(node.data.styleImages) ? node.data.styleImages : [];
+    const existingImages = Array.isArray(node.data.transferImages) ? node.data.transferImages : [];
     const files = Array.from(fileList || [])
       .filter((file) => file.type.startsWith("image/"))
-      .slice(0, maxStyleImages - existingImages.length);
+      .slice(0, maxTransferImages - existingImages.length);
 
     if (!files.length) return;
 
@@ -442,7 +448,7 @@ export default function NodeEditor() {
       for (const file of files) {
         const form = new FormData();
         form.append("asset", file);
-        form.append("nodeType", "direction");
+        form.append("nodeType", "transfer");
 
         const response = await fetch("/api/node/upload-asset", {
           method: "POST",
@@ -452,7 +458,7 @@ export default function NodeEditor() {
         if (!response.ok) throw new Error(data.error || "Upload failed.");
 
         uploadedImages.push({
-          id: `style-image-${Date.now()}-${uploadedImages.length}`,
+          id: `transfer-image-${Date.now()}-${uploadedImages.length}`,
           fileName: data.asset.fileName,
           storedFileName: data.asset.storedFileName,
           mimeType: data.asset.mimeType,
@@ -461,7 +467,7 @@ export default function NodeEditor() {
       }
 
       updateNode(node.id, {
-        styleImages: [...existingImages, ...uploadedImages].slice(0, maxStyleImages),
+        transferImages: [...existingImages, ...uploadedImages].slice(0, maxTransferImages),
         status: "ready",
         error: ""
       });
@@ -473,10 +479,10 @@ export default function NodeEditor() {
     }
   }
 
-  function removeStyleImage(nodeId, imageId) {
+  function removeTransferImage(nodeId, imageId) {
     pushUndoSnapshot();
     updateNode(nodeId, {
-      styleImages: nodes.find((node) => node.id === nodeId)?.data.styleImages?.filter((image) => image.id !== imageId) || [],
+      transferImages: nodes.find((node) => node.id === nodeId)?.data.transferImages?.filter((image) => image.id !== imageId) || [],
       activated: false,
       locked: false,
       resultUrl: "",
@@ -500,28 +506,28 @@ export default function NodeEditor() {
     });
   }
 
-  async function activateStyleNode(node) {
-    const styleImages = Array.isArray(node.data.styleImages) ? node.data.styleImages.filter((image) => image.localUrl) : [];
-    if (!styleImages.length) {
+  async function activateTransferNode(node) {
+    const transferImages = Array.isArray(node.data.transferImages) ? node.data.transferImages.filter((image) => image.localUrl) : [];
+    if (!transferImages.length) {
       updateNode(node.id, { error: "Upload at least one image." });
       return;
     }
 
     try {
-      setCompilingStyleNodeId(node.id);
+      setCompilingTransferNodeId(node.id);
       updateNode(node.id, { status: "compiling", error: "" });
-      const collageBlob = await createStyleCollageBlob(styleImages);
-      const styleFile = new File([collageBlob], "STYLE.png", { type: "image/png" });
+      const collageBlob = await createTransferCollageBlob(transferImages);
+      const transferFile = new File([collageBlob], "TRANSFER.png", { type: "image/png" });
       const form = new FormData();
-      form.append("asset", styleFile);
+      form.append("asset", transferFile);
       form.append("nodeId", node.id);
 
-      const response = await fetch("/api/node/upload-style-collage", {
+      const response = await fetch("/api/node/upload-transfer-collage", {
         method: "POST",
         body: form
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Could not compile STYLE.png.");
+      if (!response.ok) throw new Error(data.error || "Could not compile TRANSFER.png.");
 
       pushUndoSnapshot();
       updateNode(node.id, {
@@ -531,18 +537,18 @@ export default function NodeEditor() {
         fileName: data.asset.fileName,
         storedFileName: data.asset.storedFileName,
         mimeType: data.asset.mimeType,
-        hiddenPrompt: stylePromptSuffix,
+        hiddenPrompt: transferPromptSuffix,
         status: "ready",
         error: ""
       });
     } catch (error) {
       updateNode(node.id, { status: "error", error: error.message });
     } finally {
-      setCompilingStyleNodeId(null);
+      setCompilingTransferNodeId(null);
     }
   }
 
-  function unlockStyleNode(nodeId) {
+  function unlockTransferNode(nodeId) {
     pushUndoSnapshot();
     updateNode(nodeId, {
       activated: false,
@@ -785,21 +791,11 @@ export default function NodeEditor() {
           return;
         }
 
-        const source = nodes.find((node) => node.id === draftEdge.from.nodeId);
-        const targetNode = nodes.find((node) => node.id === to.nodeId);
-
         pushUndoSnapshot();
         setEdges((current) => {
           let nextEdges = current.filter(
             (edge) => !(edge.from.nodeId === draftEdge.from.nodeId && edge.from.port === draftEdge.from.port && edge.to.nodeId === to.nodeId && edge.to.port === to.port)
           );
-
-          if (source?.type === "direction" && targetNode?.type === "imageModel") {
-            nextEdges = nextEdges.filter((edge) => {
-              const edgeSource = nodes.find((node) => node.id === edge.from.nodeId);
-              return !(edge.to.nodeId === targetNode.id && edgeSource?.type === "style");
-            });
-          }
 
           return [
             ...nextEdges,
@@ -828,23 +824,26 @@ export default function NodeEditor() {
 
     if (!source || !target) return "Choose a valid connection";
 
-    if (source.type === "direction") {
-      if (!source.data.activated || !source.data.resultUrl) return "Lock Direction to enable STYLE.png output";
-      if ((target.type === "imageModel" && to.port === "imagePromptIn") || (target.type === "preview" && to.port === "sourceIn")) return "";
-      return "Direction connects to image prompts or previews";
+    if (source.type === "camera") {
+      if (!hasCameraPreset(source)) return "Choose a Camera preset before connecting";
+      if (target.type === "imageModel" && to.port === "cameraIn") return "";
+      return "Camera connects to the Image Model camera input";
     }
 
     if (source?.type === "style") {
       if ((source.data.stylePreset || "None") === "None") return "Choose a Style preset before connecting";
-      if (target.type === "imageModel" && to.port === "styleIn") {
-        if (imageModelHasDirectionConnection(nodes, edges, target.id)) return "This Image Model already has Direction connected";
-        return "";
-      }
+      if (target.type === "imageModel" && to.port === "styleIn") return "";
       return "Style presets connect to the Image Model style input";
     }
 
+    if (source.type === "transfer") {
+      if (!source.data.activated || !source.data.resultUrl) return "Lock Transfer to enable TRANSFER.png output";
+      if ((target.type === "imageModel" && to.port === "transferIn") || (target.type === "preview" && to.port === "sourceIn")) return "";
+      return "Transfer connects to the Image Model transfer input or previews";
+    }
+
     if (target?.type === "preview") {
-      if (["image", "video", "imageModel", "videoModel", "direction"].includes(source?.type)) return "";
+      if (["image", "video", "imageModel", "videoModel", "transfer"].includes(source?.type)) return "";
       return "Preview accepts image and video sources";
     }
 
@@ -982,11 +981,12 @@ export default function NodeEditor() {
       const response = await fetch(`/api/node-projects/${encodeURIComponent(id)}`);
       const project = await response.json();
       if (!response.ok) throw new Error(project.error || "Could not load project.");
+      const graph = normalizeEditorGraph(project.graph.nodes || [], project.graph.edges || []);
       setProjectId(project.id);
       setProjectName(project.name);
       setSavedProjectName(project.name);
-      setNodes(normalizeEditorNodes(project.graph.nodes || []));
-      setEdges(project.graph.edges || []);
+      setNodes(graph.nodes);
+      setEdges(graph.edges);
       setViewport(project.graph.viewport || { x: 0, y: 0, scale: 1 });
       setSelectedNodeIds([]);
       setProjectMenuOpen(false);
@@ -1029,9 +1029,8 @@ export default function NodeEditor() {
       updateNode(node.id, { status: "running", error: "" });
 
       if (node.type === "imageModel") {
-        const imagePromptItems = connectedImagePromptItems(incoming.imagePromptIn);
-        const stylePromptItems = incoming.styleIn || [];
-        const prompt = buildEffectiveImagePrompt(basePrompt, [...(incoming.imagePromptIn || []), ...stylePromptItems], node.data.aspectRatio);
+        const imagePromptItems = connectedImagePromptItems([...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
+        const prompt = buildEffectiveImagePrompt(basePrompt, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], node.data.aspectRatio);
         const response = await fetch("/api/node/generate-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1193,13 +1192,13 @@ export default function NodeEditor() {
               incoming={incomingByNode[node.id] || {}}
               onRun={runNode}
               onUpload={uploadMediaAsset}
-              onStyleImagesUpload={uploadStyleImages}
-              onStyleImageRemove={removeStyleImage}
-              onStyleActivate={activateStyleNode}
-              onStyleUnlock={unlockStyleNode}
+              onTransferImagesUpload={uploadTransferImages}
+              onTransferImageRemove={removeTransferImage}
+              onTransferActivate={activateTransferNode}
+              onTransferUnlock={unlockTransferNode}
               onPreviewResizeStart={startPreviewResize}
               running={node.data.status === "running"}
-              styleCompiling={compilingStyleNodeId === node.id}
+              transferCompiling={compilingTransferNodeId === node.id}
               selected={selectedNodeSet.has(node.id)}
             />
           ))}
@@ -1254,13 +1253,13 @@ function NodeCard({
   incoming,
   onRun,
   onUpload,
-  onStyleImagesUpload,
-  onStyleImageRemove,
-  onStyleActivate,
-  onStyleUnlock,
+  onTransferImagesUpload,
+  onTransferImageRemove,
+  onTransferActivate,
+  onTransferUnlock,
   onPreviewResizeStart,
   running,
-  styleCompiling,
+  transferCompiling,
   selected
 }) {
   const config = getNodeConfig(node.type);
@@ -1351,12 +1350,12 @@ function NodeCard({
         onDisconnectInput={onDisconnectInput}
         connectedPortKeys={connectedPortKeys}
         onUpload={onUpload}
-        onStyleImagesUpload={onStyleImagesUpload}
-        onStyleImageRemove={onStyleImageRemove}
-        onStyleActivate={onStyleActivate}
-        onStyleUnlock={onStyleUnlock}
+        onTransferImagesUpload={onTransferImagesUpload}
+        onTransferImageRemove={onTransferImageRemove}
+        onTransferActivate={onTransferActivate}
+        onTransferUnlock={onTransferUnlock}
         onPreviewResizeStart={onPreviewResizeStart}
-        styleCompiling={styleCompiling}
+        transferCompiling={transferCompiling}
       />
     </article>
   );
@@ -1446,7 +1445,7 @@ function StyleCollage({ images, locked, onRemove, onDropImages }) {
     return (
       <div className="style-collage empty" onDragOver={allowFileDrop} onDrop={handleDrop}>
         <Compass size={24} />
-        <span>Drop direction images here</span>
+        <span>Drop transfer images here</span>
       </div>
     );
   }
@@ -1455,7 +1454,7 @@ function StyleCollage({ images, locked, onRemove, onDropImages }) {
     <div className={`style-collage count-${images.length} ${locked ? "locked" : ""}`} onDragOver={allowFileDrop} onDrop={handleDrop}>
       {images.map((image) => (
         <div className="style-collage-cell" key={image.id}>
-          <img src={image.localUrl} alt={image.fileName || "Direction reference"} />
+          <img src={image.localUrl} alt={image.fileName || "Transfer reference"} />
           {!locked && (
             <button onClick={() => onRemove(image.id)} title="Remove image">
               <X size={12} />
@@ -1484,12 +1483,12 @@ function NodeBody({
   onDisconnectInput,
   connectedPortKeys,
   onUpload,
-  onStyleImagesUpload,
-  onStyleImageRemove,
-  onStyleActivate,
-  onStyleUnlock,
+  onTransferImagesUpload,
+  onTransferImageRemove,
+  onTransferActivate,
+  onTransferUnlock,
   onPreviewResizeStart,
-  styleCompiling
+  transferCompiling
 }) {
   const config = getNodeConfig(node.type);
   const outputPort = config.output[0];
@@ -1529,32 +1528,16 @@ function NodeBody({
     );
   }
 
-  if (node.type === "direction") {
-    const styleImages = Array.isArray(node.data.styleImages) ? node.data.styleImages : [];
-    const canAddImages = !node.data.locked && styleImages.length < maxStyleImages;
+  if (node.type === "camera") {
+    const cameraSelected = hasCameraPreset(node);
     return (
-      <div className="node-body style-node-body">
-        {node.data.activated && node.data.resultUrl ? (
-          <OutputPortRow node={node} port={outputPort} label="STYLE.png" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
+      <div className="node-body style-only-node-body">
+        {cameraSelected ? (
+          <OutputPortRow node={node} port={outputPort} label={cameraLabel(node)} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         ) : (
-          <div className="style-output-placeholder">Lock direction to enable output</div>
+          <div className="style-output-placeholder">Choose camera preset to enable output</div>
         )}
 
-        <StyleCollage
-          images={styleImages}
-          locked={node.data.locked}
-          onRemove={(imageId) => onStyleImageRemove(node.id, imageId)}
-          onDropImages={(files) => onStyleImagesUpload(node, files)}
-        />
-
-        <div className="style-preset-row">
-          <span>Style</span>
-          <select value={node.data.stylePreset || "None"} onChange={(event) => onUpdate(node.id, { stylePreset: event.target.value })}>
-            {stylePresetNames.map((presetName) => (
-              <option key={presetName}>{presetName}</option>
-            ))}
-          </select>
-        </div>
         <div className="style-preset-row">
           <span>Shot</span>
           <select value={node.data.shotPreset || "None"} onChange={(event) => onUpdate(node.id, { shotPreset: event.target.value })}>
@@ -1579,26 +1562,47 @@ function NodeBody({
             ))}
           </select>
         </div>
+      </div>
+    );
+  }
+
+  if (node.type === "transfer") {
+    const transferImages = Array.isArray(node.data.transferImages) ? node.data.transferImages : [];
+    const canAddImages = !node.data.locked && transferImages.length < maxTransferImages;
+    return (
+      <div className="node-body style-node-body">
+        {node.data.activated && node.data.resultUrl ? (
+          <OutputPortRow node={node} port={outputPort} label="TRANSFER.png" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
+        ) : (
+          <div className="style-output-placeholder">Lock transfer to enable output</div>
+        )}
+
+        <StyleCollage
+          images={transferImages}
+          locked={node.data.locked}
+          onRemove={(imageId) => onTransferImageRemove(node.id, imageId)}
+          onDropImages={(files) => onTransferImagesUpload(node, files)}
+        />
 
         <div className="style-actions">
           <label className={`style-upload-button ${!canAddImages ? "disabled" : ""}`}>
             <FileImage size={16} />
-            <span>{styleImages.length ? "Add images" : "Upload images"}</span>
-            <input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={!canAddImages} onChange={(event) => onStyleImagesUpload(node, event.target.files)} />
+            <span>{transferImages.length ? "Add images" : "Upload images"}</span>
+            <input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={!canAddImages} onChange={(event) => onTransferImagesUpload(node, event.target.files)} />
           </label>
           <button
             className={`style-lock-button ${node.data.locked ? "locked" : ""}`}
-            onClick={() => (node.data.locked ? onStyleUnlock(node.id) : onStyleActivate(node))}
-            disabled={styleCompiling || (!node.data.locked && !styleImages.length)}
-            title={node.data.locked ? "Unlock direction" : "Compile STYLE.png"}
+            onClick={() => (node.data.locked ? onTransferUnlock(node.id) : onTransferActivate(node))}
+            disabled={transferCompiling || (!node.data.locked && !transferImages.length)}
+            title={node.data.locked ? "Unlock transfer" : "Compile TRANSFER.png"}
           >
             {node.data.locked ? <Lock size={16} /> : <Unlock size={16} />}
           </button>
         </div>
 
         <div className="style-meta">
-          <span>{styleImages.length}/{maxStyleImages}</span>
-          <span>{styleCompiling ? "Compiling..." : node.data.locked ? "Locked" : "Editable"}</span>
+          <span>{transferImages.length}/{maxTransferImages}</span>
+          <span>{transferCompiling ? "Compiling..." : node.data.locked ? "Locked" : "Editable"}</span>
         </div>
         {node.data.fileName && <small>{node.data.fileName}</small>}
         {node.data.status === "uploading" && <small className="upload-status">Uploading...</small>}
@@ -1659,13 +1663,17 @@ function NodeBody({
   if (node.type === "imageModel") {
     const promptValue = connectedText(incoming.promptIn) || node.data.prompt;
     const promptConnected = Boolean(connectedText(incoming.promptIn));
-    const effectivePromptValue = buildEffectiveImagePrompt(promptValue, [...(incoming.imagePromptIn || []), ...(incoming.styleIn || [])], node.data.aspectRatio);
+    const effectivePromptValue = buildEffectiveImagePrompt(promptValue, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], node.data.aspectRatio);
     const promptHasGeneratedAdditions = effectivePromptValue !== promptValue;
     const imagePromptLabel = connectedSummary(incoming.imagePromptIn, "Add file");
+    const cameraPromptLabel = connectedSummary(incoming.cameraIn, "Add camera");
     const stylePromptLabel = connectedSummary(incoming.styleIn, "Add style");
+    const transferPromptLabel = connectedSummary(incoming.transferIn, "Add transfer");
     const promptPort = config.input.find((port) => port.id === "promptIn");
     const imagePromptPort = config.input.find((port) => port.id === "imagePromptIn");
+    const cameraPort = config.input.find((port) => port.id === "cameraIn");
     const stylePort = config.input.find((port) => port.id === "styleIn");
+    const transferPort = config.input.find((port) => port.id === "transferIn");
     return (
       <div className="node-body model-node-body">
         <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} type="image" status={node.data.status} error={node.data.error} />
@@ -1684,7 +1692,7 @@ function NodeBody({
         </NodeRow>
         {promptHasGeneratedAdditions && (
           <div className="effective-prompt-preview">
-            <span>Direction/style preset instructions applied</span>
+            <span>Camera/style/transfer instructions applied</span>
           </div>
         )}
         <details open>
@@ -1692,8 +1700,14 @@ function NodeBody({
           <NodeRow label="Image Prompt" inputPort={imagePromptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={imagePromptLabel !== "Add file" ? "connected-field" : ""}>{imagePromptLabel}</button>
           </NodeRow>
+          <NodeRow label="Camera" inputPort={cameraPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+            <button className={cameraPromptLabel !== "Add camera" ? "connected-field" : ""}>{cameraPromptLabel}</button>
+          </NodeRow>
           <NodeRow label="Style" inputPort={stylePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={stylePromptLabel !== "Add style" ? "connected-field" : ""}>{stylePromptLabel}</button>
+          </NodeRow>
+          <NodeRow label="Transfer" inputPort={transferPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+            <button className={transferPromptLabel !== "Add transfer" ? "connected-field" : ""}>{transferPromptLabel}</button>
           </NodeRow>
           <NodeRow label="Aspect Ratio">
             <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
@@ -1832,15 +1846,20 @@ function getNodeConfig(type) {
       input: [],
       output: [{ id: "imageOut", label: "Image", color: portColors.image }]
     },
-    direction: {
-      icon: Compass,
+    camera: {
+      icon: Camera,
       input: [],
-      output: [{ id: "styleOut", label: "STYLE.png", color: portColors.image }]
+      output: [{ id: "cameraOut", label: "Camera", color: portColors.camera }]
     },
     style: {
       icon: Palette,
       input: [],
-      output: [{ id: "styleOut", label: "Style", color: portColors.prompt }]
+      output: [{ id: "styleOut", label: "Style", color: portColors.style }]
+    },
+    transfer: {
+      icon: Compass,
+      input: [],
+      output: [{ id: "transferOut", label: "TRANSFER.png", color: portColors.transfer }]
     },
     video: {
       icon: Video,
@@ -1854,7 +1873,7 @@ function getNodeConfig(type) {
     },
     preview: {
       icon: MonitorPlay,
-      input: [{ id: "sourceIn", label: "Source", color: portColors.image }],
+      input: [{ id: "sourceIn", label: "Source", color: portColors.preview }],
       output: []
     },
     imageModel: {
@@ -1862,7 +1881,9 @@ function getNodeConfig(type) {
       input: [
         { id: "promptIn", label: "Prompt", color: portColors.prompt },
         { id: "imagePromptIn", label: "Image Prompt", color: portColors.image },
-        { id: "styleIn", label: "Style", color: portColors.prompt }
+        { id: "cameraIn", label: "Camera", color: portColors.camera },
+        { id: "styleIn", label: "Style", color: portColors.style },
+        { id: "transferIn", label: "Transfer", color: portColors.transfer }
       ],
       output: [{ id: "imageOut", label: "Image", color: portColors.image }]
     },
@@ -1889,17 +1910,21 @@ function createDefaultNodeData(type, label, count) {
   if (type === "text") return { title, text: "" };
   if (type === "image" || type === "video" || type === "audio") return { title };
   if (type === "preview") return { title, previewScale: 1 };
-  if (type === "direction") {
+  if (type === "camera") {
     return {
       title,
-      styleImages: [],
-      stylePreset: "None",
       shotPreset: "None",
       lensPreset: "None",
-      typePreset: "None",
+      typePreset: "None"
+    };
+  }
+  if (type === "transfer") {
+    return {
+      title,
+      transferImages: [],
       activated: false,
       locked: false,
-      hiddenPrompt: stylePromptSuffix
+      hiddenPrompt: transferPromptSuffix
     };
   }
   if (type === "style") return { title, stylePreset: "None" };
@@ -1968,11 +1993,6 @@ function buildConnectedPortKeys(edges) {
   return keys;
 }
 
-function imageModelHasDirectionConnection(nodes, edges, imageModelId) {
-  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  return edges.some((edge) => edge.to.nodeId === imageModelId && nodeMap.get(edge.from.nodeId)?.type === "direction");
-}
-
 function connectedText(items = []) {
   return items
     .map(({ source }) => {
@@ -2011,48 +2031,62 @@ function connectedImagePromptItems(items = []) {
       if (!source.data.resultUrl) return null;
       return {
         url: source.data.resultUrl,
-        label: source.type === "direction" ? "STYLE.png" : sourceLabel(source)
+        label: source.type === "transfer" ? "TRANSFER.png" : sourceLabel(source)
       };
     })
     .filter(Boolean);
 }
 
 function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
-  const hasDirectionReference = items.some(({ source }) => source.type === "direction" && source.data.resultUrl);
-  const styleInstructions = items
-    .flatMap(({ source }) => stylePromptPiecesForSource(source))
+  const hasTransferReference = items.some(({ source }) => source.type === "transfer" && source.data.resultUrl);
+  const promptInstructions = items
+    .flatMap(({ source }) => promptPiecesForSource(source))
     .filter(Boolean);
 
-  if (!styleInstructions.length) return prompt;
+  if (!promptInstructions.length) return prompt;
 
   const ratio = extractAspectRatio(aspectRatio);
-  const aspectInstruction = hasDirectionReference && ratio
-    ? `Generate the final image in the Image Model node's selected ${ratio} aspect ratio. Do not copy STYLE.png's collage layout or aspect ratio into the final image.`
+  const aspectInstruction = hasTransferReference && ratio
+    ? `Generate the final image in the Image Model node's selected ${ratio} aspect ratio. Do not copy TRANSFER.png's collage layout or aspect ratio into the final image.`
     : "";
 
-  return [prompt, ...styleInstructions, aspectInstruction].filter(Boolean).join("\n\n");
+  return [prompt, ...promptInstructions, aspectInstruction].filter(Boolean).join("\n\n");
 }
 
-function stylePromptPiecesForSource(source) {
+function promptPiecesForSource(source) {
+  if (source.type === "camera") {
+    return cameraPromptPieces(source);
+  }
+
   if (source.type === "style") {
     const selectedPreset = source.data.stylePreset || "None";
     return [stylePresetPrompts[selectedPreset] || ""].filter(Boolean);
   }
 
-  if (source.type !== "direction" || !source.data.activated || !source.data.resultUrl) return [];
+  if (source.type !== "transfer" || !source.data.activated || !source.data.resultUrl) return [];
 
-  const selectedPreset = source.data.stylePreset || "None";
+  return [source.data.hiddenPrompt || transferPromptSuffix].filter(Boolean);
+}
+
+function cameraPromptPieces(source) {
   const selectedShot = source.data.shotPreset || "None";
   const selectedLens = source.data.lensPreset || "None";
   const selectedType = source.data.typePreset || "None";
 
   return [
-    source.data.hiddenPrompt || stylePromptSuffix,
-    stylePresetPrompts[selectedPreset] || "",
     shotPresetPrompts[selectedShot] || "",
     lensPresetPrompts[selectedLens] || "",
     typePresetPrompts[selectedType] || ""
   ].filter(Boolean);
+}
+
+function hasCameraPreset(source) {
+  return cameraPromptPieces(source).length > 0;
+}
+
+function cameraLabel(source) {
+  const labels = [source.data.shotPreset, source.data.lensPreset, source.data.typePreset].filter((value) => value && value !== "None");
+  return labels.length ? labels.join(" + ") : "Camera";
 }
 
 function connectedSummary(items = [], fallback) {
@@ -2062,7 +2096,8 @@ function connectedSummary(items = [], fallback) {
 }
 
 function sourceLabel(source) {
-  if (source.type === "direction" && source.data.resultUrl) return "STYLE.png";
+  if (source.type === "camera") return cameraLabel(source);
+  if (source.type === "transfer" && source.data.resultUrl) return "TRANSFER.png";
   if (source.type === "style") return (source.data.stylePreset || "None") === "None" ? "Style" : source.data.stylePreset;
   if (source.data.resultUrl) return source.data.resultUrl.split("/").pop();
   if (source.data.fileName) return source.data.fileName;
@@ -2073,7 +2108,7 @@ function extractAspectRatio(value) {
   return String(value || "").match(/\d+:\d+/)?.[0] || "";
 }
 
-async function createStyleCollageBlob(images) {
+async function createTransferCollageBlob(images) {
   const loadedImages = await Promise.all(images.map((image) => loadCanvasImage(image.localUrl)));
   const columns = loadedImages.length === 1 ? 1 : loadedImages.length <= 4 ? 2 : 3;
   const rows = Math.ceil(loadedImages.length / columns);
@@ -2104,7 +2139,7 @@ async function createStyleCollageBlob(images) {
       if (blob) {
         resolve(blob);
       } else {
-        reject(new Error("Could not create STYLE.png."));
+        reject(new Error("Could not create TRANSFER.png."));
       }
     }, "image/png");
   });
@@ -2114,7 +2149,7 @@ function loadCanvasImage(src) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Could not load one of the style images."));
+    image.onerror = () => reject(new Error("Could not load one of the transfer images."));
     image.src = src;
   });
 }
@@ -2176,9 +2211,10 @@ function cloneEdge(edge) {
 }
 
 function loadNodeEditorDraft() {
+  const fallbackGraph = normalizeEditorGraph(initialNodes, initialEdges);
   const fallback = {
-    nodes: normalizeEditorNodes(initialNodes),
-    edges: initialEdges,
+    nodes: fallbackGraph.nodes,
+    edges: fallbackGraph.edges,
     viewport: { x: 0, y: 0, scale: 1 },
     projectId: null,
     projectName: "Untitled node project",
@@ -2188,9 +2224,10 @@ function loadNodeEditorDraft() {
   try {
     const parsed = JSON.parse(localStorage.getItem(nodeDraftStorageKey) || "null");
     if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return fallback;
+    const graph = normalizeEditorGraph(parsed.nodes, parsed.edges);
     return {
-      nodes: normalizeEditorNodes(parsed.nodes),
-      edges: parsed.edges,
+      nodes: graph.nodes,
+      edges: graph.edges,
       viewport: parsed.viewport || fallback.viewport,
       projectId: parsed.projectId || null,
       projectName: parsed.projectName || fallback.projectName,
@@ -2201,40 +2238,195 @@ function loadNodeEditorDraft() {
   }
 }
 
-function normalizeEditorNodes(nodes = []) {
-  return nodes.map((node) => {
-    const normalizedNode =
-      node.type === "style" && isLegacyDirectionNode(node)
-        ? {
-            ...node,
-            type: "direction",
-            data: {
-              ...node.data,
-              title: directionTitleFromLegacy(node.data?.title)
-            }
-          }
-        : node;
+function normalizeEditorGraph(nodes = [], edges = []) {
+  const normalizedNodes = [];
+  const legacySplits = new Map();
 
-    if (normalizedNode.data?.status !== "running") return normalizedNode;
+  nodes.forEach((node) => {
+    if (isLegacyDirectionNode(node)) {
+      const split = splitLegacyDirectionNode(node);
+      normalizedNodes.push(split.transferNode);
+      if (split.cameraNode) normalizedNodes.push(split.cameraNode);
+      if (split.styleNode) normalizedNodes.push(split.styleNode);
+      legacySplits.set(node.id, split);
+      return;
+    }
 
-    return {
-      ...normalizedNode,
-      data: {
-        ...normalizedNode.data,
-        status: normalizedNode.data.resultUrl ? "complete" : "ready"
-      }
-    };
+    normalizedNodes.push(clearStaleRunningState(node));
   });
+
+  const nodeMap = new Map(normalizedNodes.map((node) => [node.id, node]));
+  const normalizedEdges = [];
+
+  edges.forEach((edge) => {
+    const split = legacySplits.get(edge.from.nodeId);
+    if (split) {
+      normalizedEdges.push(...edgesForLegacyDirection(edge, split));
+      return;
+    }
+
+    const normalizedEdge = normalizeEdgeForCurrentGraph(edge, nodeMap);
+    if (normalizedEdge) normalizedEdges.push(normalizedEdge);
+  });
+
+  return {
+    nodes: normalizedNodes,
+    edges: dedupeEdges(normalizedEdges)
+  };
 }
 
 function isLegacyDirectionNode(node) {
+  return node.type === "direction" || (node.type === "style" && hasLegacyDirectionData(node));
+}
+
+function hasLegacyDirectionData(node) {
   const data = node.data || {};
   return Array.isArray(data.styleImages) || "activated" in data || "locked" in data || "hiddenPrompt" in data || "shotPreset" in data || "lensPreset" in data || "typePreset" in data;
 }
 
-function directionTitleFromLegacy(title) {
-  if (!title) return "Direction";
-  return String(title).replace(/^Style\b/, "Direction");
+function splitLegacyDirectionNode(node) {
+  const data = node.data || {};
+  const transferNode = clearStaleRunningState({
+    ...node,
+    type: "transfer",
+    data: {
+      ...data,
+      title: transferTitleFromLegacy(data.title),
+      transferImages: data.transferImages || data.styleImages || [],
+      hiddenPrompt: transferPromptSuffix
+    }
+  });
+
+  const cameraNode = hasCameraPreset({ data })
+    ? {
+        id: `${node.id}-camera`,
+        type: "camera",
+        x: node.x + 360,
+        y: node.y,
+        data: {
+          title: "Camera",
+          shotPreset: data.shotPreset || "None",
+          lensPreset: data.lensPreset || "None",
+          typePreset: data.typePreset || "None"
+        }
+      }
+    : null;
+
+  const styleNode =
+    data.stylePreset && data.stylePreset !== "None"
+      ? {
+          id: `${node.id}-style`,
+          type: "style",
+          x: node.x + 360,
+          y: node.y + 118,
+          data: {
+            title: "Style",
+            stylePreset: data.stylePreset
+          }
+        }
+      : null;
+
+  return {
+    originalId: node.id,
+    transferNode,
+    cameraNode,
+    styleNode
+  };
+}
+
+function edgesForLegacyDirection(edge, split) {
+  const edges = [];
+
+  if (edge.to.port === "imagePromptIn") {
+    edges.push({
+      ...cloneEdge(edge),
+      id: `${edge.id}-transfer`,
+      from: { nodeId: split.transferNode.id, port: "transferOut" },
+      to: { ...edge.to, port: "transferIn" },
+      color: portColors.transfer
+    });
+
+    if (split.cameraNode) {
+      edges.push({
+        id: `${edge.id}-camera`,
+        from: { nodeId: split.cameraNode.id, port: "cameraOut" },
+        to: { ...edge.to, port: "cameraIn" },
+        color: portColors.camera
+      });
+    }
+
+    if (split.styleNode) {
+      edges.push({
+        id: `${edge.id}-style`,
+        from: { nodeId: split.styleNode.id, port: "styleOut" },
+        to: { ...edge.to, port: "styleIn" },
+        color: portColors.style
+      });
+    }
+  }
+
+  if (edge.to.port === "sourceIn") {
+    edges.push({
+      ...cloneEdge(edge),
+      id: `${edge.id}-transfer`,
+      from: { nodeId: split.transferNode.id, port: "transferOut" },
+      color: portColors.transfer
+    });
+  }
+
+  return edges;
+}
+
+function normalizeEdgeForCurrentGraph(edge, nodeMap) {
+  const source = nodeMap.get(edge.from.nodeId);
+  if (!source) return null;
+
+  const nextEdge = cloneEdge(edge);
+
+  if (source.type === "transfer") {
+    nextEdge.from.port = "transferOut";
+    if (nextEdge.to.port === "imagePromptIn") nextEdge.to.port = "transferIn";
+    nextEdge.color = portColors.transfer;
+  }
+
+  if (source.type === "camera") {
+    nextEdge.from.port = "cameraOut";
+    nextEdge.color = portColors.camera;
+  }
+
+  if (source.type === "style") {
+    nextEdge.from.port = "styleOut";
+    nextEdge.color = portColors.style;
+  }
+
+  return nextEdge;
+}
+
+function dedupeEdges(edges) {
+  const seen = new Set();
+  return edges.filter((edge) => {
+    const key = `${edge.from.nodeId}:${edge.from.port}->${edge.to.nodeId}:${edge.to.port}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function clearStaleRunningState(node) {
+  if (node.data?.status !== "running") return node;
+
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      status: node.data.resultUrl ? "complete" : "ready"
+    }
+  };
+}
+
+function transferTitleFromLegacy(title) {
+  if (!title) return "Transfer";
+  return String(title).replace(/^(Style|Direction)\b/, "Transfer");
 }
 
 function roundPreviewScale(value) {
