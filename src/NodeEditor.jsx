@@ -47,6 +47,7 @@ const portColors = {
 };
 
 const maxTransferImages = 6;
+const batchOptions = ["1", "2", "3", "4"];
 const transferPromptSuffix =
   "Only use the uploaded collage reference image labeled TRANSFER.png as a transfer reference for color grading, grain style, texture, lighting, and camera qualities. The generated image should NOT take content, layout, subjects, or composition from TRANSFER.png directly; only use it as a visual transfer guide.";
 const stylePresetPrompts = {
@@ -1024,69 +1025,61 @@ export default function NodeEditor() {
 
     const incoming = incomingByNode[node.id] || {};
     const basePrompt = connectedText(incoming.promptIn) || node.data.prompt;
+    const batchCount = nodeBatchCount(node);
 
     try {
-      updateNode(node.id, { status: "running", error: "" });
+      updateNode(node.id, { status: "running", error: "", resultItems: [] });
 
       if (node.type === "imageModel") {
         const imagePromptItems = connectedImagePromptItems([...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
         const prompt = buildEffectiveImagePrompt(basePrompt, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], node.data.aspectRatio);
-        const response = await fetch("/api/node/generate-image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        const runs = Array.from({ length: batchCount }, (_, index) =>
+          runImageModelGeneration({
+            node,
             prompt,
-            model: node.data.model,
-            aspectRatio: node.data.aspectRatio,
-            resolution: node.data.resolution,
-            imagePromptUrls: imagePromptItems.map((item) => item.url),
-            imagePromptLabels: imagePromptItems.map((item) => item.label),
+            imagePromptItems,
             projectId,
             projectName,
-            nodeId: node.id,
-            nodeTitle: node.data.title
+            index
           })
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Image generation failed.");
+        );
+        const settled = await Promise.allSettled(runs);
+        const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+        const failures = settled.filter((item) => item.status === "rejected");
+        if (!successes.length) throw new Error(failures[0]?.reason?.message || "Image generation failed.");
+
         updateNode(node.id, {
           status: "complete",
-          resultUrl: data.image.localUrl,
-          resultText: data.text || "",
-          error: ""
+          resultUrl: successes[0].url,
+          resultItems: successes,
+          resultText: successes.map((item) => item.text).filter(Boolean).join("\n\n"),
+          error: failures.length ? nodeBatchStatusMessage("image", batchCount, successes.length, failures) : ""
         });
         return;
       }
 
       const prompt = basePrompt;
-      const response = await fetch("/api/node/generate-video", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const runs = Array.from({ length: batchCount }, (_, index) =>
+        runVideoModelGeneration({
+          node,
           prompt,
-          model: node.data.model,
-          duration: node.data.duration,
-          resolution: node.data.resolution,
-          aspectRatio: node.data.aspectRatio,
-          generateAudio: node.data.generateAudio,
-          startFrameUrls: connectedAssetUrls(incoming.startFrameIn),
-          endFrameUrls: connectedAssetUrls(incoming.endFrameIn),
-          referenceImageUrls: connectedAssetUrls(incoming.referenceImageIn),
-          referenceVideoUrls: connectedAssetUrls(incoming.referenceVideoIn),
-          referenceAudioUrls: connectedAssetUrls(incoming.referenceAudioIn),
+          incoming,
           projectId,
           projectName,
-          nodeId: node.id,
-          nodeTitle: node.data.title
+          index
         })
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Video generation failed.");
+      );
+      const settled = await Promise.allSettled(runs);
+      const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+      const failures = settled.filter((item) => item.status === "rejected");
+      if (!successes.length) throw new Error(failures[0]?.reason?.message || "Video generation failed.");
+
       updateNode(node.id, {
         status: "complete",
-        resultUrl: data.video.localUrl,
+        resultUrl: successes[0].url,
+        resultItems: successes,
         resultText: "",
-        error: ""
+        error: failures.length ? nodeBatchStatusMessage("video", batchCount, successes.length, failures) : ""
       });
     } catch (error) {
       updateNode(node.id, { status: "error", error: error.message });
@@ -1676,9 +1669,9 @@ function NodeBody({
     const transferPort = config.input.find((port) => port.id === "transferIn");
     return (
       <div className="node-body model-node-body">
-        <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} type="image" status={node.data.status} error={node.data.error} />
+        <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} resultItems={node.data.resultItems} type="image" status={node.data.status} error={node.data.error} />
         <button className="run-node-button" onClick={() => onRun(node)} disabled={running}>
-          {running ? "Running..." : "Run Image"}
+          {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Image"}
         </button>
         <OutputPortRow node={node} port={outputPort} label="Image output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         <NodeRow label="Model">
@@ -1708,6 +1701,15 @@ function NodeBody({
           </NodeRow>
           <NodeRow label="Transfer" inputPort={transferPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={transferPromptLabel !== "Add transfer" ? "connected-field" : ""}>{transferPromptLabel}</button>
+          </NodeRow>
+          <NodeRow label="Generations">
+            <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
+              {batchOptions.map((option) => (
+                <option key={option} value={option}>
+                  {formatNodeBatchCount(option)}
+                </option>
+              ))}
+            </select>
           </NodeRow>
           <NodeRow label="Aspect Ratio">
             <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
@@ -1739,9 +1741,9 @@ function NodeBody({
   const referenceAudioPort = config.input.find((port) => port.id === "referenceAudioIn");
   return (
     <div className="node-body model-node-body">
-      <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} type="video" status={node.data.status} error={node.data.error} />
+      <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} resultItems={node.data.resultItems} type="video" status={node.data.status} error={node.data.error} />
       <button className="run-node-button" onClick={() => onRun(node)} disabled={running}>
-        {running ? "Running..." : "Run Video"}
+        {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Video"}
       </button>
       <OutputPortRow node={node} port={outputPort} label="Video output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
       <NodeRow label="Model">
@@ -1769,6 +1771,15 @@ function NodeBody({
         </NodeRow>
         <NodeRow label="Reference Audio" inputPort={referenceAudioPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
           <button className={incoming.referenceAudioIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceAudioIn, "Add file")}</button>
+        </NodeRow>
+        <NodeRow label="Generations">
+          <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
+            {batchOptions.map((option) => (
+              <option key={option} value={option}>
+                {formatNodeBatchCount(option)}
+              </option>
+            ))}
+          </select>
         </NodeRow>
         <NodeRow label="Duration">
           <select value={node.data.duration} onChange={(event) => onUpdate(node.id, { duration: event.target.value })}>
@@ -1802,12 +1813,23 @@ function NodeBody({
   );
 }
 
-function ResultPane({ label, resultUrl, type, status, error }) {
+function ResultPane({ label, resultUrl, resultItems = [], type, status, error }) {
+  const items = normalizedResultItems(resultItems, resultUrl, type);
+
   return (
-    <div className={`result-pane ${resultUrl ? "has-result" : ""}`}>
-      {resultUrl && type === "image" && <img src={resultUrl} alt="Generated image" />}
-      {resultUrl && type === "video" && <video src={resultUrl} controls />}
-      {!resultUrl && <span>{status === "running" ? "Running..." : label}</span>}
+    <div className={`result-pane ${items.length ? "has-result" : ""} ${items.length > 1 ? "multi-result" : ""}`}>
+      {items.length > 0 && (
+        <div className="result-grid">
+          {items.map((item, index) => (
+            <div className="result-item" key={item.url || index}>
+              {item.type === "image" && <img src={item.url} alt={item.label || `Generated image ${index + 1}`} />}
+              {item.type === "video" && <video src={item.url} controls />}
+              {items.length > 1 && <span>{item.label || `${type === "image" ? "Image" : "Video"} ${index + 1}`}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+      {!items.length && <span>{status === "running" ? "Running..." : label}</span>}
       {error && <small>{error}</small>}
     </div>
   );
@@ -1934,7 +1956,8 @@ function createDefaultNodeData(type, label, count) {
       model: "Nano Banana Pro",
       prompt: "",
       aspectRatio: "21:9",
-      resolution: "2K"
+      resolution: "2K",
+      batchCount: "1"
     };
   }
 
@@ -1945,7 +1968,8 @@ function createDefaultNodeData(type, label, count) {
     duration: "15 seconds",
     resolution: "720p",
     aspectRatio: "16:9 (Landscape)",
-    generateAudio: true
+    generateAudio: true,
+    batchCount: "1"
   };
 }
 
@@ -2006,6 +2030,91 @@ function connectedText(items = []) {
 
 function connectedAssetUrls(items = []) {
   return items.map(({ source }) => source.data.resultUrl).filter(Boolean);
+}
+
+async function runImageModelGeneration({ node, prompt, imagePromptItems, projectId, projectName, index }) {
+  const response = await fetch("/api/node/generate-image", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      model: node.data.model,
+      aspectRatio: node.data.aspectRatio,
+      resolution: node.data.resolution,
+      imagePromptUrls: imagePromptItems.map((item) => item.url),
+      imagePromptLabels: imagePromptItems.map((item) => item.label),
+      projectId,
+      projectName,
+      nodeId: node.id,
+      nodeTitle: node.data.title
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(`Run ${index + 1}: ${data.error || "Image generation failed."}`);
+
+  return {
+    url: data.image.localUrl,
+    type: "image",
+    label: `Image ${index + 1}`,
+    text: data.text || "",
+    cost: data.cost
+  };
+}
+
+async function runVideoModelGeneration({ node, prompt, incoming, projectId, projectName, index }) {
+  const response = await fetch("/api/node/generate-video", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      model: node.data.model,
+      duration: node.data.duration,
+      resolution: node.data.resolution,
+      aspectRatio: node.data.aspectRatio,
+      generateAudio: node.data.generateAudio,
+      startFrameUrls: connectedAssetUrls(incoming.startFrameIn),
+      endFrameUrls: connectedAssetUrls(incoming.endFrameIn),
+      referenceImageUrls: connectedAssetUrls(incoming.referenceImageIn),
+      referenceVideoUrls: connectedAssetUrls(incoming.referenceVideoIn),
+      referenceAudioUrls: connectedAssetUrls(incoming.referenceAudioIn),
+      projectId,
+      projectName,
+      nodeId: node.id,
+      nodeTitle: node.data.title
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(`Run ${index + 1}: ${data.error || "Video generation failed."}`);
+
+  return {
+    url: data.video.localUrl,
+    type: "video",
+    label: `Video ${index + 1}`,
+    seed: data.seed,
+    cost: data.cost
+  };
+}
+
+function normalizedResultItems(resultItems, resultUrl, type) {
+  const items = Array.isArray(resultItems) ? resultItems.filter((item) => item?.url) : [];
+  if (items.length) return items.map((item, index) => ({ type, label: `${type === "image" ? "Image" : "Video"} ${index + 1}`, ...item }));
+  return resultUrl ? [{ url: resultUrl, type, label: type === "image" ? "Image 1" : "Video 1" }] : [];
+}
+
+function nodeBatchCount(node) {
+  const count = Number(node.data.batchCount || 1);
+  return Math.min(4, Math.max(1, Number.isFinite(count) ? count : 1));
+}
+
+function formatNodeBatchCount(value) {
+  const count = Number(value) || 1;
+  return `${count} gen${count === 1 ? "" : "s"}`;
+}
+
+function nodeBatchStatusMessage(mediaType, total, completed, failures) {
+  const label = mediaType === "image" ? "image" : "video";
+  const firstError = failures[0]?.reason?.message || "";
+  return `${completed} of ${total} ${label} generations complete.${firstError ? ` ${firstError}` : ""}`;
 }
 
 function connectedPreviewSource(items = []) {
