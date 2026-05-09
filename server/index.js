@@ -603,8 +603,8 @@ app.post(
         endpoint: route.endpoint,
         mode: route.label,
         project: {
-          id: "composer",
-          name: "Composer"
+          id: "video",
+          name: "Video"
         },
         referenceNames,
         settings: {

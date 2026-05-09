@@ -2,7 +2,6 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowUp,
-  Check,
   ChevronDown,
   Clock3,
   ImagePlus,
@@ -21,12 +20,17 @@ import NodeEditor from "./NodeEditor.jsx";
 import StatsDashboard from "./StatsDashboard.jsx";
 import "./styles.css";
 
-const aspectRatios = ["21:9", "16:9", "9:16", "1:1", "4:3", "3:4", "auto"];
-const resolutions = ["720p", "480p", "1080p"];
+const videoAspectRatios = ["21:9", "16:9", "9:16", "1:1", "4:3", "3:4", "auto"];
+const videoResolutions = ["720p", "480p", "1080p"];
 const speeds = ["standard", "fast"];
+const imageModels = ["Nano Banana Pro", "OpenAI Image 2"];
+const nanoImageAspectRatios = ["21:9", "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4"];
+const openAiImageAspectRatios = ["21:9", "16:9", "1:1", "9:16"];
+const imageResolutions = ["2K", "1K", "4K"];
 
 function App() {
   const promptRef = React.useRef(null);
+  const imagePromptRef = React.useRef(null);
   const [prompt, setPrompt] = React.useState("");
   const [startFrame, setStartFrame] = React.useState(null);
   const [endFrame, setEndFrame] = React.useState(null);
@@ -41,12 +45,20 @@ function App() {
   const [status, setStatus] = React.useState("idle");
   const [message, setMessage] = React.useState("");
   const [result, setResult] = React.useState(null);
-  const [history, setHistory] = React.useState([]);
-  const [apiReady, setApiReady] = React.useState(null);
-  const [workspaceMode, setWorkspaceMode] = React.useState("composer");
+  const [videoHistory, setVideoHistory] = React.useState([]);
+  const [imagePrompt, setImagePrompt] = React.useState("");
+  const [imageModel, setImageModel] = React.useState("Nano Banana Pro");
+  const [imageReferences, setImageReferences] = React.useState([]);
+  const [imageMentionState, setImageMentionState] = React.useState({ open: false, query: "", start: 0 });
+  const [imageResolution, setImageResolution] = React.useState("2K");
+  const [imageAspectRatio, setImageAspectRatio] = React.useState("21:9");
+  const [imageStatus, setImageStatus] = React.useState("idle");
+  const [imageMessage, setImageMessage] = React.useState("");
+  const [imageResult, setImageResult] = React.useState(null);
+  const [imageHistory, setImageHistory] = React.useState([]);
+  const [workspaceMode, setWorkspaceMode] = React.useState("image");
 
   React.useEffect(() => {
-    refreshHealth();
     refreshHistory();
   }, []);
 
@@ -56,22 +68,26 @@ function App() {
     return "Text";
   }, [references.length, startFrame]);
 
-  async function refreshHealth() {
-    try {
-      const response = await fetch("/api/health");
-      const data = await response.json();
-      setApiReady(Boolean(data.falKeyConfigured));
-    } catch {
-      setApiReady(false);
+  const activeImageAspectRatios = React.useMemo(
+    () => (imageModel === "OpenAI Image 2" ? openAiImageAspectRatios : nanoImageAspectRatios),
+    [imageModel]
+  );
+
+  React.useEffect(() => {
+    if (!activeImageAspectRatios.includes(imageAspectRatio)) {
+      setImageAspectRatio(activeImageAspectRatios[0]);
     }
-  }
+  }, [activeImageAspectRatios, imageAspectRatio]);
 
   async function refreshHistory() {
     try {
       const response = await fetch("/api/history");
-      setHistory((await response.json()).filter(isComposerVideoHistory));
+      const data = await response.json();
+      setVideoHistory(data.filter(isVideoWorkspaceHistory));
+      setImageHistory(data.filter(isImageWorkspaceHistory));
     } catch {
-      setHistory([]);
+      setVideoHistory([]);
+      setImageHistory([]);
     }
   }
 
@@ -121,8 +137,86 @@ function App() {
     }
   }
 
+  async function generateImage() {
+    if (!imagePrompt.trim()) {
+      setImageMessage("Add a prompt first.");
+      return;
+    }
+
+    setImageStatus("generating");
+    setImageMessage("Uploading references and sending the image request...");
+    setImageResult(null);
+
+    try {
+      const uploadedReferences = [];
+      for (const reference of imageReferences) {
+        const uploadForm = new FormData();
+        uploadForm.append("asset", reference.file);
+        const uploadResponse = await fetch("/api/node/upload-asset", {
+          method: "POST",
+          body: uploadForm
+        });
+        const uploadData = await uploadResponse.json();
+
+        if (!uploadResponse.ok) {
+          throw new Error(uploadData.error || "Could not upload a reference image.");
+        }
+
+        uploadedReferences.push(uploadData.asset);
+      }
+
+      const response = await fetch("/api/node/generate-image", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          prompt: imagePrompt.trim(),
+          model: imageModel,
+          aspectRatio: imageAspectRatio,
+          resolution: imageResolution,
+          imagePromptUrls: uploadedReferences.map((reference) => reference.localUrl),
+          imagePromptLabels: imageReferences.map((reference) => reference.name),
+          projectId: "image",
+          projectName: "Image",
+          nodeId: "image-tab",
+          nodeTitle: "Image"
+        })
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Image generation failed.");
+      }
+
+      setImageResult(data);
+      setImageStatus("complete");
+      setImageMessage(`${imageModel} complete.`);
+      await refreshHistory();
+    } catch (error) {
+      setImageStatus("error");
+      setImageMessage(error.message);
+    }
+  }
+
   function addReferences(files) {
     setReferences((current) => {
+      const usedNames = new Set(current.map((reference) => reference.name.toLowerCase()));
+      const incoming = Array.from(files).map((file, index) => {
+        const name = uniqueReferenceName(suggestReferenceName(file, current.length + index + 1), usedNames);
+        return {
+          id: crypto.randomUUID(),
+          file,
+          name
+        };
+      });
+
+      return [...current, ...incoming].slice(0, 9);
+    });
+  }
+
+  function addImageReferences(files) {
+    setImageReferences((current) => {
       const usedNames = new Set(current.map((reference) => reference.name.toLowerCase()));
       const incoming = Array.from(files).map((file, index) => {
         const name = uniqueReferenceName(suggestReferenceName(file, current.length + index + 1), usedNames);
@@ -141,8 +235,25 @@ function App() {
     setReferences((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
+  function removeImageReference(index) {
+    setImageReferences((current) => current.filter((_, itemIndex) => itemIndex !== index));
+  }
+
   function updateReferenceName(id, value) {
     setReferences((current) =>
+      current.map((reference) =>
+        reference.id === id
+          ? {
+              ...reference,
+              name: cleanReferenceName(value)
+            }
+          : reference
+      )
+    );
+  }
+
+  function updateImageReferenceName(id, value) {
+    setImageReferences((current) =>
       current.map((reference) =>
         reference.id === id
           ? {
@@ -166,14 +277,36 @@ function App() {
     });
   }
 
+  function normalizeImageReferenceName(id) {
+    setImageReferences((current) => {
+      const usedNames = new Set();
+      return current.map((reference, index) => {
+        const fallback = `Image${index + 1}`;
+        const baseName = reference.id === id && !reference.name ? fallback : reference.name || fallback;
+        const name = uniqueReferenceName(baseName, usedNames);
+        return { ...reference, name };
+      });
+    });
+  }
+
   function handlePromptChange(event) {
     const nextPrompt = event.target.value;
     setPrompt(nextPrompt);
     updateMentionState(nextPrompt, event.target.selectionStart);
   }
 
+  function handleImagePromptChange(event) {
+    const nextPrompt = event.target.value;
+    setImagePrompt(nextPrompt);
+    updateImageMentionState(nextPrompt, event.target.selectionStart);
+  }
+
   function handlePromptCursor(event) {
     updateMentionState(event.target.value, event.target.selectionStart);
+  }
+
+  function handleImagePromptCursor(event) {
+    updateImageMentionState(event.target.value, event.target.selectionStart);
   }
 
   function updateMentionState(text, cursor) {
@@ -186,6 +319,22 @@ function App() {
     }
 
     setMentionState({
+      open: true,
+      query: match[2],
+      start: cursor - match[2].length - 1
+    });
+  }
+
+  function updateImageMentionState(text, cursor) {
+    const beforeCursor = text.slice(0, cursor);
+    const match = beforeCursor.match(/(^|\s)@([A-Za-z0-9_-]*)$/);
+
+    if (!match || !imageReferences.length) {
+      setImageMentionState({ open: false, query: "", start: cursor });
+      return;
+    }
+
+    setImageMentionState({
       open: true,
       query: match[2],
       start: cursor - match[2].length - 1
@@ -208,8 +357,25 @@ function App() {
     });
   }
 
+  function insertImageReferenceMention(name) {
+    const textarea = imagePromptRef.current;
+    const cursor = textarea?.selectionStart ?? imagePrompt.length;
+    const start = imageMentionState.open ? imageMentionState.start : cursor;
+    const nextPrompt = `${imagePrompt.slice(0, start)}@${name} ${imagePrompt.slice(cursor)}`;
+    const nextCursor = start + name.length + 2;
+
+    setImagePrompt(nextPrompt);
+    setImageMentionState({ open: false, query: "", start: nextCursor });
+
+    requestAnimationFrame(() => {
+      imagePromptRef.current?.focus();
+      imagePromptRef.current?.setSelectionRange(nextCursor, nextCursor);
+    });
+  }
+
   async function removeHistoryItem(item) {
-    const shouldRemove = window.confirm("Remove this item from Recent generations? The saved video file will stay in outputs.");
+    const mediaLabel = item.mediaType === "image" ? "image" : "video";
+    const shouldRemove = window.confirm(`Remove this item from Recent generations? The saved ${mediaLabel} file will stay in outputs.`);
     if (!shouldRemove) return;
 
     try {
@@ -222,10 +388,13 @@ function App() {
         throw new Error(data.error || "Could not remove this generation.");
       }
 
-      setHistory(data.filter(isComposerVideoHistory));
+      setVideoHistory(data.filter(isVideoWorkspaceHistory));
+      setImageHistory(data.filter(isImageWorkspaceHistory));
       setMessage("Removed from Recent generations.");
+      setImageMessage("Removed from Recent generations.");
     } catch (error) {
       setMessage(error.message);
+      setImageMessage(error.message);
     }
   }
 
@@ -233,8 +402,11 @@ function App() {
     <main className="app-shell">
       <div className="topbar">
         <div className="mode-switch" aria-label="Workspace mode">
-          <button className={workspaceMode === "composer" ? "active" : ""} onClick={() => setWorkspaceMode("composer")}>
-            Composer
+          <button className={workspaceMode === "image" ? "active" : ""} onClick={() => setWorkspaceMode("image")}>
+            Image
+          </button>
+          <button className={workspaceMode === "video" ? "active" : ""} onClick={() => setWorkspaceMode("video")}>
+            Video
           </button>
           <button className={workspaceMode === "nodes" ? "active" : ""} onClick={() => setWorkspaceMode("nodes")}>
             Nodes
@@ -243,13 +415,90 @@ function App() {
             Stats
           </button>
         </div>
-        <div className={`key-status ${apiReady ? "ready" : "missing"}`}>
-          {apiReady ? <Check size={15} /> : <X size={15} />}
-          <span>{apiReady ? "Fal key ready" : "Add FAL_KEY"}</span>
-        </div>
       </div>
 
-      {workspaceMode === "composer" ? (
+      {workspaceMode === "image" ? (
+        <>
+          <section className="studio">
+            <div className="composer">
+              {imageReferences.length > 0 && (
+                <div className="drop-row">
+                  {imageReferences.map((file, index) => (
+                    <ReferenceThumb
+                      key={file.id}
+                      reference={file}
+                      index={index}
+                      onInsert={insertImageReferenceMention}
+                      onRename={updateImageReferenceName}
+                      onRenameComplete={normalizeImageReferenceName}
+                      onRemove={() => removeImageReference(index)}
+                    />
+                  ))}
+                  <label className="mini-upload" title="Add reference images">
+                    <Upload size={16} />
+                    <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(event) => addImageReferences(event.target.files || [])} />
+                  </label>
+                </div>
+              )}
+
+              <textarea
+                ref={imagePromptRef}
+                value={imagePrompt}
+                onChange={handleImagePromptChange}
+                onKeyUp={handleImagePromptCursor}
+                onClick={handleImagePromptCursor}
+                onFocus={handleImagePromptCursor}
+                placeholder="Describe your image, use @ to reference named images, or guide the visual style"
+                spellCheck="true"
+              />
+
+              {imageMentionState.open && (
+                <MentionMenu
+                  query={imageMentionState.query}
+                  references={imageReferences}
+                  onSelect={insertImageReferenceMention}
+                />
+              )}
+
+              <div className="control-row">
+                <SelectChip icon={<Wand2 size={17} />} value={imageModel} options={imageModels} onChange={setImageModel} />
+
+                <ReferenceChip count={imageReferences.length} onSelect={addImageReferences} />
+
+                <SelectChip icon={<Maximize2 size={16} />} value={imageResolution} options={imageResolutions} onChange={setImageResolution} />
+
+                <SelectChip value={imageAspectRatio} options={activeImageAspectRatios} onChange={setImageAspectRatio} />
+
+                <button className="generate-button" onClick={generateImage} disabled={imageStatus === "generating"} title="Generate image">
+                  {imageStatus === "generating" ? <Loader2 className="spin" size={22} /> : <ArrowUp size={22} />}
+                </button>
+              </div>
+            </div>
+
+            <div className="route-strip">
+              <span>{imageModel}</span>
+              <span>{imageResolution}</span>
+              <span>{imageAspectRatio}</span>
+              <span>{imageReferences.length ? `${imageReferences.length} ref${imageReferences.length === 1 ? "" : "s"}` : "Text"}</span>
+            </div>
+
+            <div className="result-zone">
+              <StatusPanel status={imageStatus} message={imageMessage} />
+              {imageResult?.image?.localUrl && (
+                <div className="image-stage">
+                  <img src={imageResult.image.localUrl} alt="Generated image" />
+                  <div className="video-meta">
+                    <span>{imageModel}</span>
+                    <span>{formatCost(imageResult.cost)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <Gallery history={imageHistory} onRemove={removeHistoryItem} />
+        </>
+      ) : workspaceMode === "video" ? (
         <>
           <section className="studio">
             <div className="composer">
@@ -328,11 +577,11 @@ function App() {
                   onClear={() => setEndFrame(null)}
                 />
 
-                <SelectChip icon={<Maximize2 size={16} />} value={resolution} options={resolutions} onChange={setResolution} />
+                <SelectChip icon={<Maximize2 size={16} />} value={resolution} options={videoResolutions} onChange={setResolution} />
 
                 <DurationChip duration={duration} onChange={setDuration} />
 
-                <SelectChip value={aspectRatio} options={aspectRatios} onChange={setAspectRatio} />
+                <SelectChip value={aspectRatio} options={videoAspectRatios} onChange={setAspectRatio} />
 
                 <button className={`chip icon-chip ${generateAudio ? "active" : ""}`} onClick={() => setGenerateAudio((value) => !value)} title="Audio">
                   {generateAudio ? <Music2 size={17} /> : <Pause size={17} />}
@@ -375,7 +624,7 @@ function App() {
             </div>
           </section>
 
-          <Gallery history={history} onRemove={removeHistoryItem} />
+          <Gallery history={videoHistory} onRemove={removeHistoryItem} />
         </>
       ) : workspaceMode === "nodes" ? (
         <NodeEditor />
@@ -575,10 +824,14 @@ function Gallery({ history, onRemove }) {
             <button className="history-remove" onClick={() => onRemove(item)} title="Remove from recent generations">
               <Trash2 size={15} />
             </button>
-            <video controls src={item.localVideo} />
+            {item.mediaType === "image" ? (
+              <img src={item.localImage} alt={item.prompt || "Generated image"} />
+            ) : (
+              <video controls src={item.localVideo} />
+            )}
             <div>
               <p>{item.prompt}</p>
-              <span>{item.mode}</span>
+              <span>{[item.modelName || item.mode, formatCost(item.cost)].filter(Boolean).join(" · ")}</span>
             </div>
           </article>
         ))}
@@ -587,8 +840,18 @@ function Gallery({ history, onRemove }) {
   );
 }
 
-function isComposerVideoHistory(item) {
-  return item?.mediaType === "video" && item?.project?.id === "composer" && Boolean(item?.localVideo);
+function isVideoWorkspaceHistory(item) {
+  return item?.mediaType === "video" && ["composer", "video"].includes(item?.project?.id) && Boolean(item?.localVideo);
+}
+
+function isImageWorkspaceHistory(item) {
+  return item?.mediaType === "image" && item?.project?.id === "image" && Boolean(item?.localImage);
+}
+
+function formatCost(cost) {
+  const amount = Number(cost?.amountUsd);
+  if (!Number.isFinite(amount) || amount <= 0) return "";
+  return `$${amount.toFixed(amount >= 1 ? 2 : 4)}`;
 }
 
 createRoot(document.getElementById("root")).render(<App />);

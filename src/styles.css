@@ -47,7 +47,7 @@ button {
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 16px;
 }
 
@@ -73,32 +73,6 @@ button {
 .mode-switch button.active {
   color: #121212;
   background: #ddc631;
-}
-
-.key-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.key-status {
-  min-height: 34px;
-  padding: 0 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
-  color: #b9b3aa;
-  background: rgba(255, 255, 255, 0.05);
-  font-size: 13px;
-}
-
-.key-status.ready {
-  color: #9fe6bd;
-  border-color: rgba(159, 230, 189, 0.25);
-}
-
-.key-status.missing {
-  color: #e4b38f;
-  border-color: rgba(228, 179, 143, 0.28);
 }
 
 .studio {
@@ -527,7 +501,8 @@ textarea::placeholder {
   border-color: rgba(167, 232, 191, 0.2);
 }
 
-.video-stage {
+.video-stage,
+.image-stage {
   margin-top: 14px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -540,6 +515,14 @@ textarea::placeholder {
   width: 100%;
   max-height: 520px;
   background: #000;
+}
+
+.image-stage img {
+  display: block;
+  width: 100%;
+  max-height: 680px;
+  object-fit: contain;
+  background: #070707;
 }
 
 .video-meta {
@@ -618,7 +601,8 @@ textarea::placeholder {
   color: #111;
 }
 
-.history-card video {
+.history-card video,
+.history-card img {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -1036,6 +1020,16 @@ textarea::placeholder {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .mode-switch {
+    width: 100%;
+  }
+
+  .mode-switch button {
+    flex: 1;
+    min-width: 0;
+    padding: 0 8px;
   }
 
   .studio {

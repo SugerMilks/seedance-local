@@ -325,7 +325,7 @@ function normalizeUsageItem(item, pricing) {
   const mediaType = item.mediaType || (item.localImage ? "image" : "video");
   const settings = item.settings || {};
   const modelName = item.modelName || inferModelName(item, mediaType);
-  const projectName = item.project?.name || "Composer";
+  const projectName = item.project?.name || (mediaType === "image" ? "Image" : "Video");
   const cost = Number(item.cost?.amountUsd ?? estimateItemCost(item, mediaType, pricing));
   const durationSeconds = mediaType === "video" ? durationToSeconds(settings.duration) : 0;
   const cutoff = startOfDay(new Date());
