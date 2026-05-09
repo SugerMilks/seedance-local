@@ -2,6 +2,8 @@ import React from "react";
 import {
   Camera,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Compass,
   FileAudio,
   FileImage,
@@ -1028,7 +1030,7 @@ export default function NodeEditor() {
     const batchCount = nodeBatchCount(node);
 
     try {
-      updateNode(node.id, { status: "running", error: "", resultItems: [] });
+      updateNode(node.id, { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 });
 
       if (node.type === "imageModel") {
         const imagePromptItems = connectedImagePromptItems([...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
@@ -1052,6 +1054,7 @@ export default function NodeEditor() {
           status: "complete",
           resultUrl: successes[0].url,
           resultItems: successes,
+          selectedResultIndex: 0,
           resultText: successes.map((item) => item.text).filter(Boolean).join("\n\n"),
           error: failures.length ? nodeBatchStatusMessage("image", batchCount, successes.length, failures) : ""
         });
@@ -1078,6 +1081,7 @@ export default function NodeEditor() {
         status: "complete",
         resultUrl: successes[0].url,
         resultItems: successes,
+        selectedResultIndex: 0,
         resultText: "",
         error: failures.length ? nodeBatchStatusMessage("video", batchCount, successes.length, failures) : ""
       });
@@ -1669,7 +1673,16 @@ function NodeBody({
     const transferPort = config.input.find((port) => port.id === "transferIn");
     return (
       <div className="node-body model-node-body">
-        <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} resultItems={node.data.resultItems} type="image" status={node.data.status} error={node.data.error} />
+        <ResultPane
+          label="Results will appear here"
+          resultUrl={node.data.resultUrl}
+          resultItems={node.data.resultItems}
+          selectedIndex={node.data.selectedResultIndex}
+          type="image"
+          status={node.data.status}
+          error={node.data.error}
+          onSelectResult={(index, item) => onUpdate(node.id, { selectedResultIndex: index, resultUrl: item.url })}
+        />
         <button className="run-node-button" onClick={() => onRun(node)} disabled={running}>
           {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Image"}
         </button>
@@ -1741,7 +1754,16 @@ function NodeBody({
   const referenceAudioPort = config.input.find((port) => port.id === "referenceAudioIn");
   return (
     <div className="node-body model-node-body">
-      <ResultPane label="Results will appear here" resultUrl={node.data.resultUrl} resultItems={node.data.resultItems} type="video" status={node.data.status} error={node.data.error} />
+      <ResultPane
+        label="Results will appear here"
+        resultUrl={node.data.resultUrl}
+        resultItems={node.data.resultItems}
+        selectedIndex={node.data.selectedResultIndex}
+        type="video"
+        status={node.data.status}
+        error={node.data.error}
+        onSelectResult={(index, item) => onUpdate(node.id, { selectedResultIndex: index, resultUrl: item.url })}
+      />
       <button className="run-node-button" onClick={() => onRun(node)} disabled={running}>
         {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Video"}
       </button>
@@ -1813,20 +1835,36 @@ function NodeBody({
   );
 }
 
-function ResultPane({ label, resultUrl, resultItems = [], type, status, error }) {
+function ResultPane({ label, resultUrl, resultItems = [], selectedIndex = 0, type, status, error, onSelectResult }) {
   const items = normalizedResultItems(resultItems, resultUrl, type);
+  const activeIndex = Math.min(Math.max(Number(selectedIndex) || 0, 0), Math.max(items.length - 1, 0));
+  const activeItem = items[activeIndex];
+
+  function selectOffset(offset) {
+    if (!items.length) return;
+    const nextIndex = (activeIndex + offset + items.length) % items.length;
+    onSelectResult?.(nextIndex, items[nextIndex]);
+  }
 
   return (
     <div className={`result-pane ${items.length ? "has-result" : ""} ${items.length > 1 ? "multi-result" : ""}`}>
-      {items.length > 0 && (
-        <div className="result-grid">
-          {items.map((item, index) => (
-            <div className="result-item" key={item.url || index}>
-              {item.type === "image" && <img src={item.url} alt={item.label || `Generated image ${index + 1}`} />}
-              {item.type === "video" && <video src={item.url} controls />}
-              {items.length > 1 && <span>{item.label || `${type === "image" ? "Image" : "Video"} ${index + 1}`}</span>}
+      {activeItem && (
+        <div className="result-carousel" onPointerDown={(event) => event.stopPropagation()}>
+          <div className="result-item" key={activeItem.url}>
+            {activeItem.type === "image" && <img src={activeItem.url} alt={activeItem.label || `Generated image ${activeIndex + 1}`} />}
+            {activeItem.type === "video" && <video src={activeItem.url} controls />}
+          </div>
+          {items.length > 1 && (
+            <div className="result-cycle-controls" onPointerDown={(event) => event.stopPropagation()}>
+              <button type="button" onClick={() => selectOffset(-1)} title="Previous generation">
+                <ChevronLeft size={15} />
+              </button>
+              <span>{activeIndex + 1}/{items.length}</span>
+              <button type="button" onClick={() => selectOffset(1)} title="Next generation">
+                <ChevronRight size={15} />
+              </button>
             </div>
-          ))}
+          )}
         </div>
       )}
       {!items.length && <span>{status === "running" ? "Running..." : label}</span>}

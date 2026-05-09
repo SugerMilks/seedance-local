@@ -776,15 +776,9 @@
   padding: 8px;
 }
 
-.result-grid {
-  display: grid;
+.result-carousel {
+  position: relative;
   width: 100%;
-  gap: 8px;
-}
-
-.result-pane.multi-result .result-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
 }
 
 .result-item {
@@ -803,17 +797,42 @@
   background: #000;
 }
 
-.result-item span {
-  overflow: hidden;
-  color: rgba(244, 240, 232, 0.52);
-  font-size: 11px;
-  font-weight: 760;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .videoModel .result-item video {
   max-height: 335px;
+}
+
+.result-cycle-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: rgba(244, 240, 232, 0.78);
+  background: rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(12px);
+}
+
+.result-cycle-controls button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  color: #f4f0e8;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.result-cycle-controls span {
+  min-width: 32px;
+  color: rgba(244, 240, 232, 0.72);
+  font-size: 11px;
+  font-weight: 820;
+  text-align: center;
 }
 
 .result-pane small {
