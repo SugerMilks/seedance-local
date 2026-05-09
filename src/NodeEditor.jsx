@@ -164,6 +164,7 @@ const initialEdges = [
 ];
 
 const sceneSize = 3200;
+const contextMenuSize = { width: 190, height: 382, inset: 8 };
 const minZoom = 0.35;
 const maxZoom = 1.9;
 const nodeDraftStorageKey = "seedance-node-editor-draft-v1";
@@ -597,8 +598,8 @@ export default function NodeEditor() {
           return start
             ? {
                 ...node,
-                x: Math.max(20, start.x + deltaX),
-                y: Math.max(20, start.y + deltaY)
+                x: start.x + deltaX,
+                y: start.y + deltaY
               }
             : node;
         })
@@ -672,9 +673,10 @@ export default function NodeEditor() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
+    const menuPosition = clampContextMenuPosition(event.clientX - rect.left, event.clientY - rect.top, rect);
     setContextMenu({
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
+      x: menuPosition.x,
+      y: menuPosition.y,
       scene: screenToScene(event.clientX, event.clientY)
     });
   }
@@ -718,7 +720,7 @@ export default function NodeEditor() {
 
     if (event.ctrlKey || event.metaKey) {
       setViewport((current) => {
-        const zoomFactor = Math.exp(-event.deltaY * 0.003);
+        const zoomFactor = Math.exp(-event.deltaY * 0.006);
         const nextScale = clamp(current.scale * zoomFactor, minZoom, maxZoom);
         const scenePoint = {
           x: (pointer.x - current.x) / current.scale,
@@ -1152,6 +1154,11 @@ export default function NodeEditor() {
       <div
         ref={canvasRef}
         className="node-canvas"
+        style={{
+          "--grid-size": `${28 * viewport.scale}px`,
+          "--grid-x": `${positiveModulo(viewport.x, 28 * viewport.scale)}px`,
+          "--grid-y": `${positiveModulo(viewport.y, 28 * viewport.scale)}px`
+        }}
         onPointerDown={startCanvasPointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishConnection}
@@ -2582,4 +2589,19 @@ function roundPreviewScale(value) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function clampContextMenuPosition(x, y, rect) {
+  const maxX = Math.max(contextMenuSize.inset, rect.width - contextMenuSize.width - contextMenuSize.inset);
+  const maxY = Math.max(contextMenuSize.inset, rect.height - contextMenuSize.height - contextMenuSize.inset);
+
+  return {
+    x: clamp(x, contextMenuSize.inset, maxX),
+    y: clamp(y, contextMenuSize.inset, maxY)
+  };
+}
+
+function positiveModulo(value, divisor) {
+  if (!divisor) return 0;
+  return ((value % divisor) + divisor) % divisor;
 }
