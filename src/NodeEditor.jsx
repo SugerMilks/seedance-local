@@ -8,6 +8,7 @@ import {
   FileAudio,
   FileImage,
   Film,
+  FolderOpen,
   MonitorPlay,
   ImagePlus,
   Lock,
@@ -172,6 +173,7 @@ const previewBaseWidth = 330;
 export default function NodeEditor() {
   const canvasRef = React.useRef(null);
   const projectMenuRef = React.useRef(null);
+  const workflowFileInputRef = React.useRef(null);
   const undoStackRef = React.useRef([]);
   const clipboardRef = React.useRef(null);
   const savedDraft = React.useMemo(loadNodeEditorDraft, []);
@@ -957,8 +959,8 @@ export default function NodeEditor() {
 
   async function loadProjects() {
     try {
-      const response = await fetch("/api/node-projects");
-      if (!response.ok) throw new Error("Could not load saved projects.");
+      const response = await fetch("/api/saved-workflows");
+      if (!response.ok) throw new Error("Could not load saved workflows.");
       const projectList = await response.json();
       setProjects(projectList);
       if (projectId && !savedProjectName) {
@@ -977,7 +979,7 @@ export default function NodeEditor() {
       const shouldCreateNewProject = Boolean(projectId && lastSavedName && cleanProjectName !== lastSavedName);
 
       setSaveStatus("Saving...");
-      const response = await fetch("/api/node-projects", {
+      const response = await fetch("/api/saved-workflows", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -989,14 +991,54 @@ export default function NodeEditor() {
         })
       });
       const project = await response.json();
-      if (!response.ok) throw new Error(project.error || "Could not save project.");
+      if (!response.ok) throw new Error(project.error || "Could not save workflow.");
       setProjectId(project.id);
       setProjectName(project.name);
       setSavedProjectName(project.name);
-      setSaveStatus(shouldCreateNewProject ? "Saved as new project" : "Saved");
+      setSaveStatus(project.fileName ? `Saved ${project.fileName}` : shouldCreateNewProject ? "Saved as new workflow" : "Saved");
       await loadProjects();
     } catch (error) {
       setSaveStatus(error.message);
+    }
+  }
+
+  function applyWorkflow(project, sourceLabel = "Loaded") {
+    const graph = normalizeEditorGraph(project.graph?.nodes || [], project.graph?.edges || []);
+    setProjectId(project.id || null);
+    setProjectName(project.name || "Untitled node project");
+    setSavedProjectName(project.name || null);
+    setNodes(graph.nodes);
+    setEdges(graph.edges);
+    setViewport(project.graph?.viewport || { x: 0, y: 0, scale: 1 });
+    setSelectedNodeIds([]);
+    setProjectMenuOpen(false);
+    setSaveStatus(project.fileName ? `${sourceLabel} ${project.fileName}` : sourceLabel);
+  }
+
+  async function openWorkflowFile(file) {
+    if (!file) return;
+
+    try {
+      const project = JSON.parse(await file.text());
+      if (!project?.graph || !Array.isArray(project.graph.nodes) || !Array.isArray(project.graph.edges)) {
+        throw new Error("That JSON file is not a NewtNode workflow.");
+      }
+
+      applyWorkflow(
+        {
+          ...project,
+          id: project.id || null,
+          name: project.name || file.name.replace(/\.json$/i, "") || "Untitled node project",
+          fileName: file.name
+        },
+        "Opened"
+      );
+    } catch (error) {
+      setSaveStatus(error.message || "Could not open workflow.");
+    } finally {
+      if (workflowFileInputRef.current) {
+        workflowFileInputRef.current.value = "";
+      }
     }
   }
 
@@ -1004,19 +1046,12 @@ export default function NodeEditor() {
     if (!id) return;
 
     try {
-      const response = await fetch(`/api/node-projects/${encodeURIComponent(id)}`);
+      const selectedProject = projects.find((project) => project.id === id || project.fileName === id);
+      const fileName = selectedProject?.fileName || id;
+      const response = await fetch(`/api/saved-workflows/${encodeURIComponent(fileName)}`);
       const project = await response.json();
-      if (!response.ok) throw new Error(project.error || "Could not load project.");
-      const graph = normalizeEditorGraph(project.graph.nodes || [], project.graph.edges || []);
-      setProjectId(project.id);
-      setProjectName(project.name);
-      setSavedProjectName(project.name);
-      setNodes(graph.nodes);
-      setEdges(graph.edges);
-      setViewport(project.graph.viewport || { x: 0, y: 0, scale: 1 });
-      setSelectedNodeIds([]);
-      setProjectMenuOpen(false);
-      setSaveStatus("Loaded");
+      if (!response.ok) throw new Error(project.error || "Could not load workflow.");
+      applyWorkflow(project, "Loaded");
     } catch (error) {
       setSaveStatus(error.message);
     }
@@ -1026,11 +1061,11 @@ export default function NodeEditor() {
     if (!window.confirm(`Delete "${project.name}"?`)) return;
 
     try {
-      const response = await fetch(`/api/node-projects/${encodeURIComponent(project.id)}`, {
+      const response = await fetch(`/api/saved-workflows/${encodeURIComponent(project.fileName || project.id)}`, {
         method: "DELETE"
       });
       const nextProjects = await response.json();
-      if (!response.ok) throw new Error(nextProjects.error || "Could not delete project.");
+      if (!response.ok) throw new Error(nextProjects.error || "Could not delete workflow.");
       setProjects(nextProjects);
       if (projectId === project.id) {
         setProjectId(null);
@@ -1038,14 +1073,14 @@ export default function NodeEditor() {
         setSavedProjectName(null);
       }
       setProjectMenuOpen(false);
-      setSaveStatus("Project deleted");
+      setSaveStatus("Workflow deleted");
     } catch (error) {
       setSaveStatus(error.message);
     }
   }
 
   async function runNode(node) {
-    if (node.type !== "imageModel" && node.type !== "videoModel") return;
+    if (node.type !== "text" && node.type !== "imageModel" && node.type !== "videoModel") return;
     if (node.data.status === "running") return;
 
     const incoming = incomingByNode[node.id] || {};
@@ -1053,7 +1088,22 @@ export default function NodeEditor() {
     const batchCount = nodeBatchCount(node);
 
     try {
-      updateNode(node.id, { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 });
+      const runningPatch =
+        node.type === "text"
+          ? { status: "running", error: "" }
+          : { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 };
+      updateNode(node.id, runningPatch);
+
+      if (node.type === "text") {
+        const processed = await runTextNodeProcessing({ node, incoming, projectId, projectName });
+        updateNode(node.id, {
+          status: "complete",
+          error: "",
+          resultText: processed.text,
+          lastRunModel: processed.model
+        });
+        return;
+      }
 
       if (node.type === "imageModel") {
         const imagePromptItems = connectedImagePromptItems([...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
@@ -1134,9 +1184,20 @@ export default function NodeEditor() {
             <Save size={16} />
             <span>Save</span>
           </button>
+          <button onClick={() => workflowFileInputRef.current?.click()} title="Open workflow JSON">
+            <FolderOpen size={16} />
+            <span>Open</span>
+          </button>
+          <input
+            ref={workflowFileInputRef}
+            className="workflow-file-input"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => openWorkflowFile(event.target.files?.[0])}
+          />
           <div className="project-picker" ref={projectMenuRef}>
-            <button className="project-picker-trigger" onClick={() => setProjectMenuOpen((open) => !open)} title="Load saved project">
-              <span>{selectedProjectName || "Load project"}</span>
+            <button className="project-picker-trigger" onClick={() => setProjectMenuOpen((open) => !open)} title="Load saved workflow">
+              <span>{selectedProjectName || "Load workflow"}</span>
               <ChevronDown size={13} />
             </button>
             {projectMenuOpen && (
@@ -1144,16 +1205,16 @@ export default function NodeEditor() {
                 {projects.length ? (
                   projects.map((project) => (
                     <div className="project-menu-row" key={project.id}>
-                      <button className="project-load" onClick={() => loadProject(project.id)} title={`Load ${project.name}`}>
+                      <button className="project-load" onClick={() => loadProject(project.id)} title={`Load ${project.fileName || project.name}`}>
                         {project.name}
                       </button>
-                      <button className="project-delete" onClick={() => deleteProject(project)} title={`Delete ${project.name}`}>
+                      <button className="project-delete" onClick={() => deleteProject(project)} title={`Delete ${project.fileName || project.name}`}>
                         <Trash2 size={13} />
                       </button>
                     </div>
                   ))
                 ) : (
-                  <small>No saved projects</small>
+                  <small>No saved workflows</small>
                 )}
               </div>
             )}
@@ -1521,10 +1582,52 @@ function NodeBody({
   const outputPort = config.output[0];
 
   if (node.type === "text") {
+    const hasOutputPanel = Boolean(node.data.resultText) || node.data.status === "running" || node.data.status === "complete";
+    const textPort = config.input.find((port) => port.id === "textIn");
+    const imagePort = config.input.find((port) => port.id === "imageIn");
+    const videoPort = config.input.find((port) => port.id === "videoIn");
+    const hasRunInput =
+      Boolean(String(node.data.text || "").trim()) ||
+      Boolean(incoming.textIn?.length) ||
+      Boolean(incoming.imageIn?.length) ||
+      Boolean(incoming.videoIn?.length);
     return (
-      <div className="node-body">
+      <div className="node-body text-node-body">
         <OutputPortRow node={node} port={outputPort} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
-        <textarea value={node.data.text} onChange={(event) => onUpdate(node.id, { text: event.target.value })} />
+        <div className="text-input-port-stack" aria-label="Text node inputs">
+          {[textPort, imagePort, videoPort].filter(Boolean).map((port) => (
+            <PortHandle
+              key={port.id}
+              node={node}
+              port={port}
+              side="input"
+              onConnectStart={onConnectStart}
+              onDisconnectInput={onDisconnectInput}
+              connectedPortKeys={connectedPortKeys}
+            />
+          ))}
+        </div>
+        <div className={hasOutputPanel ? "text-split-panel" : "text-single-panel"}>
+          <label className="text-field-group">
+            <span>Original prompt</span>
+            <textarea value={node.data.text} onChange={(event) => onUpdate(node.id, { text: event.target.value })} />
+          </label>
+          {hasOutputPanel && (
+            <label className="text-field-group">
+              <span>Output</span>
+              <textarea
+                value={node.data.resultText || ""}
+                placeholder={running ? "Running..." : "Output will appear here"}
+                onChange={(event) => onUpdate(node.id, { resultText: event.target.value })}
+              />
+            </label>
+          )}
+        </div>
+        <button className="run-node-button" onClick={() => onRun(node)} disabled={running || !hasRunInput}>
+          {running ? "Running..." : "Run Text"}
+        </button>
+        {node.data.lastRunModel && <small className="upload-status">Processed with {node.data.lastRunModel}</small>}
+        {node.data.error && <small className="upload-error">{node.data.error}</small>}
       </div>
     );
   }
@@ -1928,7 +2031,11 @@ function getNodeConfig(type) {
   const configs = {
     text: {
       icon: Type,
-      input: [],
+      input: [
+        { id: "textIn", label: "Text", color: portColors.prompt },
+        { id: "imageIn", label: "Image", color: portColors.image },
+        { id: "videoIn", label: "Video", color: portColors.video }
+      ],
       output: [{ id: "promptOut", label: "Prompt", color: portColors.prompt }]
     },
     image: {
@@ -2088,7 +2195,7 @@ function buildConnectedPortKeys(edges) {
 function connectedText(items = []) {
   return items
     .map(({ source }) => {
-      if (source.type === "text") return source.data.text;
+      if (source.type === "text") return source.data.resultText || source.data.text;
       if (source.type === "imageModel" || source.type === "videoModel") return source.data.resultText;
       return source.data.title;
     })
@@ -2098,6 +2205,52 @@ function connectedText(items = []) {
 
 function connectedAssetUrls(items = []) {
   return items.map(({ source }) => source.data.resultUrl).filter(Boolean);
+}
+
+function connectedTextInputItems(items = []) {
+  return items
+    .map(({ source }) => ({
+      label: sourceLabel(source),
+      text: source.type === "text" ? source.data.resultText || source.data.text : source.data.resultText || source.data.prompt || source.data.title
+    }))
+    .filter((item) => item.text);
+}
+
+function connectedMediaInputItems(items = [], mediaType) {
+  return items
+    .map(({ source }) => {
+      if (!source.data.resultUrl) return null;
+      return {
+        url: source.data.resultUrl,
+        label: sourceLabel(source),
+        type: mediaType
+      };
+    })
+    .filter(Boolean);
+}
+
+async function runTextNodeProcessing({ node, incoming, projectId, projectName }) {
+  const response = await fetch("/api/node/process-text", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: node.data.text,
+      textInputs: connectedTextInputItems(incoming.textIn),
+      imageInputs: connectedMediaInputItems(incoming.imageIn, "image"),
+      videoInputs: connectedMediaInputItems(incoming.videoIn, "video"),
+      projectId,
+      projectName,
+      nodeId: node.id,
+      nodeTitle: node.data.title
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Text processing failed.");
+
+  return {
+    text: data.text || "",
+    model: data.model || ""
+  };
 }
 
 async function runImageModelGeneration({ node, prompt, imagePromptItems, projectId, projectName, index }) {

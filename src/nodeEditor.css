@@ -84,6 +84,10 @@
   padding: 0 9px;
 }
 
+.project-tools .workflow-file-input {
+  display: none;
+}
+
 .project-picker {
   position: relative;
 }
@@ -443,6 +447,70 @@
   font-size: 14px;
   line-height: 1.38;
   resize: vertical;
+}
+
+.text-node-body {
+  display: grid;
+  gap: 10px;
+  position: relative;
+}
+
+.text-node-body .port-row,
+.text-node-body .run-node-button {
+  margin-bottom: 0;
+}
+
+.text-input-port-stack {
+  position: absolute;
+  top: 58px;
+  left: -9px;
+  z-index: 5;
+  display: grid;
+  gap: 10px;
+}
+
+.text-single-panel,
+.text-split-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.text-split-panel {
+  grid-template-rows: minmax(112px, 1fr) minmax(112px, 1fr);
+}
+
+.text-field-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.text-field-group span {
+  color: rgba(244, 240, 232, 0.56);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.text-field-group textarea {
+  min-height: 112px;
+}
+
+.text-split-panel .text-field-group textarea {
+  min-height: 112px;
+  resize: vertical;
+}
+
+.text-node-body small {
+  color: rgba(244, 240, 232, 0.6);
+  font-size: 12px;
+}
+
+.text-node-body .upload-status {
+  color: #ddc631;
+}
+
+.text-node-body .upload-error {
+  color: #f3a288;
 }
 
 .media-node-body {
