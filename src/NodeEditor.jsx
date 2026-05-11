@@ -163,7 +163,6 @@ const initialEdges = [
   { id: "edge-2", from: { nodeId: "image-1", port: "imageOut" }, to: { nodeId: "image-model-1", port: "imagePromptIn" }, color: portColors.image }
 ];
 
-const sceneSize = 3200;
 const contextMenuSize = { width: 190, height: 382, inset: 8 };
 const minZoom = 0.35;
 const maxZoom = 1.9;
@@ -588,6 +587,16 @@ export default function NodeEditor() {
   function handlePointerMove(event) {
     const pointer = screenToScene(event.clientX, event.clientY);
 
+    if (dragState?.type === "pan") {
+      event.preventDefault();
+      setViewport({
+        ...dragState.viewport,
+        x: dragState.viewport.x + event.clientX - dragState.startClient.x,
+        y: dragState.viewport.y + event.clientY - dragState.startClient.y
+      });
+      return;
+    }
+
     if (dragState?.type === "nodes") {
       const deltaX = pointer.x - dragState.startPointer.x;
       const deltaY = pointer.y - dragState.startPointer.y;
@@ -648,7 +657,7 @@ export default function NodeEditor() {
   }
 
   function startCanvasPointerDown(event) {
-    if (event.target !== event.currentTarget && !event.target.classList.contains("node-scene")) return;
+    if (!isCanvasSurface(event.target, event.currentTarget)) return;
     setContextMenu(null);
     const pointer = screenToScene(event.clientX, event.clientY);
 
@@ -665,6 +674,18 @@ export default function NodeEditor() {
     }
 
     setSelectedNodeIds([]);
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragState({
+      type: "pan",
+      startClient: {
+        x: event.clientX,
+        y: event.clientY
+      },
+      viewport
+    });
   }
 
   function openCanvasContextMenu(event) {
@@ -1168,12 +1189,10 @@ export default function NodeEditor() {
         <div
           className="node-scene"
           style={{
-            width: `${sceneSize}px`,
-            height: `${sceneSize}px`,
             transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`
           }}
         >
-          <svg className="edge-layer" viewBox={`0 0 ${sceneSize} ${sceneSize}`}>
+          <svg className="edge-layer">
             {edges.map((edge) => {
               const from = getPortPoint(edge.from.nodeId, edge.from.port);
               const to = getPortPoint(edge.to.nodeId, edge.to.port);
@@ -1244,6 +1263,10 @@ function SelectionMarquee({ start, current }) {
       rx="8"
     />
   );
+}
+
+function isCanvasSurface(target, canvas) {
+  return target === canvas || target.classList?.contains("node-scene") || target.classList?.contains("edge-layer");
 }
 
 function NodeCard({

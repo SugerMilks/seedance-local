@@ -352,7 +352,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${workspaceMode === "nodes" ? "node-app-shell" : ""}`}>
       <div className="topbar">
         <div className="brand-lockup" aria-label="NewtNode">
           <img src="/newtnode-logo.png" alt="NewtNode" />

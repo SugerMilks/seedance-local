@@ -44,6 +44,12 @@ button {
   padding: 24px 0 56px;
 }
 
+.app-shell.node-app-shell {
+  width: 100%;
+  max-width: none;
+  padding: 24px 16px 16px;
+}
+
 .topbar {
   display: flex;
   align-items: center;
