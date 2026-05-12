@@ -179,8 +179,10 @@ const videoModelNames = {
   seedance: "Seedance 2.0",
   seedanceFast: "Seedance 2.0 Fast",
   wanFunControl: "Wan Fun Control",
-  aurora: "Creatify Aurora"
+  aurora: "Creatify Aurora",
+  sam3Video: "SAM 3 Video"
 };
+const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 
 export default function NodeEditor() {
   const canvasRef = React.useRef(null);
@@ -1395,7 +1397,10 @@ export default function NodeEditor() {
     const currentIncomingByNode = buildIncomingByNode(nodesRef.current, edgesRef.current);
     const incoming = currentIncomingByNode[currentNode.id] || {};
     const basePrompt = connectedText(incoming.promptIn) || currentNode.data.prompt;
-    const batchCount = nodeBatchCount(currentNode);
+    const isSingleRunSegmentation =
+      (currentNode.type === "imageModel" && isSam3ImageModel(currentNode.data.model)) ||
+      (currentNode.type === "videoModel" && isSam3VideoModel(currentNode.data.model));
+    const batchCount = isSingleRunSegmentation ? 1 : nodeBatchCount(currentNode);
 
     try {
       const runningPatch =
@@ -1416,8 +1421,11 @@ export default function NodeEditor() {
       }
 
       if (currentNode.type === "imageModel") {
-        const imagePromptItems = connectedImagePromptItems([...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
-        const prompt = buildEffectiveImagePrompt(basePrompt, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], currentNode.data.aspectRatio);
+        const isSegmentation = isSam3ImageModel(currentNode.data.model);
+        const imagePromptItems = connectedImagePromptItems(isSegmentation ? incoming.imagePromptIn || [] : [...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
+        const prompt = isSegmentation
+          ? basePrompt
+          : buildEffectiveImagePrompt(basePrompt, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], currentNode.data.aspectRatio);
         const runIndexes = Array.from({ length: batchCount }, (_, index) => index);
         const settled = await settleSequential(runIndexes, (index) =>
           runImageModelGeneration({
@@ -2299,7 +2307,8 @@ function NodeBody({
   if (node.type === "imageModel") {
     const promptValue = connectedText(incoming.promptIn) || node.data.prompt;
     const promptConnected = Boolean(connectedText(incoming.promptIn));
-    const effectivePromptValue = buildEffectiveImagePrompt(promptValue, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], node.data.aspectRatio);
+    const isSam3Image = isSam3ImageModel(node.data.model);
+    const effectivePromptValue = isSam3Image ? promptValue : buildEffectiveImagePrompt(promptValue, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], node.data.aspectRatio);
     const promptHasGeneratedAdditions = effectivePromptValue !== promptValue;
     const imagePromptLabel = connectedSummary(incoming.imagePromptIn, "Add file");
     const cameraPromptLabel = connectedSummary(incoming.cameraIn, "Add camera");
@@ -2311,6 +2320,7 @@ function NodeBody({
     const stylePort = config.input.find((port) => port.id === "styleIn");
     const transferPort = config.input.find((port) => port.id === "transferIn");
     const settingsOpen = Boolean(node.data.settingsOpen);
+    const collapsedPorts = isSam3Image ? [promptPort, imagePromptPort] : [promptPort, imagePromptPort, cameraPort, stylePort, transferPort];
     return (
       <div className="node-body model-node-body image-model-body">
         <ResultPane
@@ -2326,7 +2336,7 @@ function NodeBody({
         <OutputPortRow node={node} port={outputPort} label="Image output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         {!settingsOpen && (
           <div className="model-input-port-stack image-model-input-port-stack" aria-label="Image model inputs">
-            {[promptPort, imagePromptPort, cameraPort, stylePort, transferPort].filter(Boolean).map((port) => (
+            {collapsedPorts.filter(Boolean).map((port) => (
               <PortHandle
                 key={port.id}
                 node={node}
@@ -2340,7 +2350,7 @@ function NodeBody({
           </div>
         )}
         <button className="run-node-button" onClick={() => onRun(node)} disabled={running}>
-          {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Image"}
+          {running ? `Running ${formatNodeBatchCount(isSam3Image ? 1 : node.data.batchCount)}...` : "Run Image"}
         </button>
         <details className="model-settings-drawer" open={settingsOpen} onToggle={(event) => onUpdate(node.id, { settingsOpen: event.currentTarget.open })}>
           <summary>Settings</summary>
@@ -2356,45 +2366,51 @@ function NodeBody({
             <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
               <option>Nano Banana Pro</option>
               <option>OpenAI Image 2</option>
+              {sam3SegmentationModelsEnabled && <option>SAM 3 Image</option>}
             </select>
           </NodeRow>
-          <NodeRow label="Image Prompt" inputPort={settingsOpen ? imagePromptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+          <NodeRow label={isSam3Image ? "Image" : "Image Prompt"} inputPort={settingsOpen ? imagePromptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={imagePromptLabel !== "Add file" ? "connected-field" : ""}>{imagePromptLabel}</button>
           </NodeRow>
-          <NodeRow label="Camera" inputPort={settingsOpen ? cameraPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-            <button className={cameraPromptLabel !== "Add camera" ? "connected-field" : ""}>{cameraPromptLabel}</button>
-          </NodeRow>
-          <NodeRow label="Style" inputPort={settingsOpen ? stylePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-            <button className={stylePromptLabel !== "Add style" ? "connected-field" : ""}>{stylePromptLabel}</button>
-          </NodeRow>
-          <NodeRow label="Transfer" inputPort={settingsOpen ? transferPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-            <button className={transferPromptLabel !== "Add transfer" ? "connected-field" : ""}>{transferPromptLabel}</button>
-          </NodeRow>
-          <NodeRow label="Generations">
-            <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
-              {batchOptions.map((option) => (
-                <option key={option} value={option}>
-                  {formatNodeBatchCount(option)}
-                </option>
-              ))}
-            </select>
-          </NodeRow>
-          <NodeRow label="Aspect Ratio">
-            <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
-              <option>21:9</option>
-              <option>16:9</option>
-              <option>1:1</option>
-              <option>9:16</option>
-            </select>
-          </NodeRow>
-          <NodeRow label="Resolution">
-            <select value={node.data.resolution} onChange={(event) => onUpdate(node.id, { resolution: event.target.value })}>
-              <option>2K</option>
-              <option>1K</option>
-              <option>4K</option>
-            </select>
-          </NodeRow>
+          {!isSam3Image && (
+            <>
+              <NodeRow label="Camera" inputPort={settingsOpen ? cameraPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                <button className={cameraPromptLabel !== "Add camera" ? "connected-field" : ""}>{cameraPromptLabel}</button>
+              </NodeRow>
+              <NodeRow label="Style" inputPort={settingsOpen ? stylePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                <button className={stylePromptLabel !== "Add style" ? "connected-field" : ""}>{stylePromptLabel}</button>
+              </NodeRow>
+              <NodeRow label="Transfer" inputPort={settingsOpen ? transferPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                <button className={transferPromptLabel !== "Add transfer" ? "connected-field" : ""}>{transferPromptLabel}</button>
+              </NodeRow>
+              <NodeRow label="Generations">
+                <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
+                  {batchOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {formatNodeBatchCount(option)}
+                    </option>
+                  ))}
+                </select>
+              </NodeRow>
+              <NodeRow label="Aspect Ratio">
+                <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
+                  <option>21:9</option>
+                  <option>16:9</option>
+                  <option>1:1</option>
+                  <option>9:16</option>
+                </select>
+              </NodeRow>
+              <NodeRow label="Resolution">
+                <select value={node.data.resolution} onChange={(event) => onUpdate(node.id, { resolution: event.target.value })}>
+                  <option>2K</option>
+                  <option>1K</option>
+                  <option>4K</option>
+                </select>
+              </NodeRow>
+            </>
+          )}
         </details>
+        {isSam3Image && <small className="upload-status model-status-note">segmentation model</small>}
       </div>
     );
   }
@@ -2409,12 +2425,15 @@ function NodeBody({
   const referenceAudioPort = config.input.find((port) => port.id === "referenceAudioIn");
   const isWanFunControl = isWanFunControlModel(node.data.model);
   const isAurora = isAuroraModel(node.data.model);
+  const isSam3Video = isSam3VideoModel(node.data.model);
   const settingsOpen = Boolean(node.data.settingsOpen);
   const collapsedPorts = isWanFunControl
     ? [promptPort, referenceVideoPort, referenceImagePort]
     : isAurora
       ? [promptPort, referenceImagePort, referenceAudioPort]
-      : [promptPort, startFramePort, endFramePort, referenceImagePort, referenceVideoPort, referenceAudioPort];
+      : isSam3Video
+        ? [promptPort, referenceVideoPort]
+        : [promptPort, startFramePort, endFramePort, referenceImagePort, referenceVideoPort, referenceAudioPort];
   return (
     <div className="node-body model-node-body video-model-body">
       <ResultPane
@@ -2428,7 +2447,7 @@ function NodeBody({
         onSelectResult={(index, item) => onUpdate(node.id, { selectedResultIndex: index, resultUrl: item.url })}
       />
       <button className="run-node-button" onClick={() => onRun(node)} disabled={running}>
-        {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Video"}
+        {running ? `Running ${formatNodeBatchCount(isSam3Video ? 1 : node.data.batchCount)}...` : "Run Video"}
       </button>
       <OutputPortRow node={node} port={outputPort} label="Video output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
       {!settingsOpen && (
@@ -2454,20 +2473,23 @@ function NodeBody({
             <option>{videoModelNames.seedanceFast}</option>
             <option>{videoModelNames.wanFunControl}</option>
             <option>{videoModelNames.aurora}</option>
+            {sam3SegmentationModelsEnabled && <option>{videoModelNames.sam3Video}</option>}
           </select>
         </NodeRow>
         <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
           <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
         </NodeRow>
-        <NodeRow label="Generations">
-          <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
-            {batchOptions.map((option) => (
-              <option key={option} value={option}>
-                {formatNodeBatchCount(option)}
-              </option>
-            ))}
-          </select>
-        </NodeRow>
+        {!isSam3Video && (
+          <NodeRow label="Generations">
+            <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
+              {batchOptions.map((option) => (
+                <option key={option} value={option}>
+                  {formatNodeBatchCount(option)}
+                </option>
+              ))}
+            </select>
+          </NodeRow>
+        )}
         {isWanFunControl ? (
           <>
             <NodeRow label="Control Video" inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -2535,6 +2557,12 @@ function NodeBody({
               </select>
             </NodeRow>
           </>
+        ) : isSam3Video ? (
+          <>
+            <NodeRow label="Video" inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add video")}</button>
+            </NodeRow>
+          </>
         ) : (
           <>
             <NodeRow label="Start Frame" inputPort={settingsOpen ? startFramePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -2583,6 +2611,7 @@ function NodeBody({
         )}
       </details>
       {isAurora && <small className="upload-status model-status-note">lipsync model</small>}
+      {isSam3Video && <small className="upload-status model-status-note">segmentation model</small>}
     </div>
   );
 }
@@ -2775,6 +2804,18 @@ function isWanFunControlModel(model) {
 function isAuroraModel(model) {
   const normalized = String(model || "").toLowerCase();
   return normalized.includes("aurora") || normalized.includes("creatify");
+}
+
+function isSam3ImageModel(model) {
+  if (!sam3SegmentationModelsEnabled) return false;
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("sam") && normalized.includes("image");
+}
+
+function isSam3VideoModel(model) {
+  if (!sam3SegmentationModelsEnabled) return false;
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("sam") && normalized.includes("video");
 }
 
 function configTitleFallback(type) {

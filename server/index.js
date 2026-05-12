@@ -36,6 +36,7 @@ const textLlmProvider = String(process.env.TEXT_LLM_PROVIDER || "fal").toLowerCa
 const falTextModel = process.env.FAL_TEXT_MODEL || "openai/gpt-4o";
 const falVisionTextModel = process.env.FAL_VISION_TEXT_MODEL || falTextModel;
 const falVideoTextModel = process.env.FAL_VIDEO_TEXT_MODEL || "google/gemini-2.5-flash";
+const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 
 const app = express();
 
@@ -352,6 +353,18 @@ app.post("/api/node/generate-image", async (req, res) => {
     const imagePromptUrls = Array.isArray(req.body.imagePromptUrls) ? req.body.imagePromptUrls.filter(isLocalAssetUrl) : [];
     const imagePromptLabels = Array.isArray(req.body.imagePromptLabels) ? req.body.imagePromptLabels : [];
 
+    if (selectedModel.provider === "disabled") {
+      return res.status(400).json({ error: `${selectedModel.displayName} is temporarily disabled.` });
+    }
+
+    if (selectedModel.provider === "fal-sam3-image") {
+      return runSam3ImageSegmentation(req, res, {
+        prompt,
+        imagePromptUrls,
+        imagePromptLabels
+      });
+    }
+
     if (selectedModel.provider === "openai") {
       if (!openAiImageApiKey) {
         return res.status(400).json({ error: "Missing OPENAI_IMAGE_API_KEY in .env." });
@@ -496,6 +509,96 @@ app.post("/api/node/generate-image", async (req, res) => {
   }
 });
 
+async function runSam3ImageSegmentation(req, res, { prompt, imagePromptUrls, imagePromptLabels }) {
+  if (!process.env.FAL_KEY) {
+    return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+  }
+
+  const imageUrl = firstLocalOutput(imagePromptUrls);
+  if (!imageUrl) {
+    return res.status(400).json({ error: "SAM 3 Image requires a connected image." });
+  }
+
+  const endpoint = "fal-ai/sam-3/image";
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    prompt,
+    apply_mask: true,
+    output_format: "png",
+    return_multiple_masks: true,
+    max_masks: 3,
+    include_scores: true,
+    include_boxes: true
+  };
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteImage = firstFalImageResult(result?.data);
+
+  if (!remoteImage?.url && Array.isArray(result?.data?.masks) && !result.data.masks.length) {
+    return res.status(422).json({
+      error: "SAM 3 Image did not find a matching segment. Try naming a visible object in the image, like helmet, face, person, or robot.",
+      raw: result?.data
+    });
+  }
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no segmentation image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "sam-3-image-segmentation", remoteImage.content_type || remoteImage.mimeType);
+  const returnedMaskCount = Array.isArray(result?.data?.masks) ? result.data.masks.length : 0;
+  const maskCount = returnedMaskCount || 1;
+  const text = `Segmented ${maskCount} ${maskCount === 1 ? "mask" : "masks"}.`;
+  const cost = estimateSam3ImageCost({ endpoint });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: "SAM 3 Image",
+    endpoint,
+    mode: "SAM 3 image segmentation",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: req.body.model || "SAM 3 Image",
+      imageCount: 1,
+      imagePromptLabel: cleanImagePromptLabel(imagePromptLabels[0]),
+      applyMask: input.apply_mask,
+      outputFormat: input.output_format,
+      includeScores: input.include_scores,
+      includeBoxes: input.include_boxes,
+      maskCount
+    },
+    cost,
+    remoteImage,
+    remoteMasks: result?.data?.masks || [],
+    metadata: result?.data?.metadata || [],
+    scores: result?.data?.scores || [],
+    boxes: result?.data?.boxes || [],
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    }
+  });
+}
+
 app.post("/api/node/generate-video", async (req, res) => {
   try {
     if (!process.env.FAL_KEY) {
@@ -508,6 +611,10 @@ app.post("/api/node/generate-video", async (req, res) => {
     }
 
     const selectedVideoModel = resolveVideoModel(req.body.model);
+
+    if (selectedVideoModel.provider === "disabled") {
+      return res.status(400).json({ error: `${selectedVideoModel.displayName} is temporarily disabled.` });
+    }
 
     if (selectedVideoModel.provider === "fal-wan-fun-control") {
       return runWanFunControlVideo(req, res, {
@@ -522,6 +629,13 @@ app.post("/api/node/generate-video", async (req, res) => {
         prompt,
         referenceImageUrls: Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [],
         referenceAudioUrls: Array.isArray(req.body.referenceAudioUrls) ? req.body.referenceAudioUrls.filter(isLocalAssetUrl) : []
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-sam3-video") {
+      return runSam3VideoSegmentation(req, res, {
+        prompt,
+        referenceVideoUrls: Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : []
       });
     }
 
@@ -627,6 +741,70 @@ app.post("/api/node/generate-video", async (req, res) => {
     res.status(500).json({ error: error.message || "Video generation failed." });
   }
 });
+
+async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "SAM 3 Video requires a connected video." });
+  }
+
+  const endpoint = "fal-ai/sam-3/video";
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    prompt,
+    apply_mask: true,
+    video_output_type: "X264 (.mp4)",
+    detection_threshold: 0.5
+  };
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no segmentation video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "sam-3-video-segmentation");
+  const cost = estimateSam3VideoCost({ endpoint });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: "SAM 3 Video",
+    endpoint,
+    mode: "SAM 3 video segmentation",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: req.body.model || "SAM 3 Video",
+      videoCount: 1,
+      applyMask: input.apply_mask,
+      outputType: input.video_output_type,
+      detectionThreshold: input.detection_threshold
+    },
+    cost,
+    remoteVideo,
+    boundingboxFramesZip: normalizeFalFile(result?.data?.boundingbox_frames_zip),
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
 
 async function runAuroraVideo(req, res, { prompt, referenceImageUrls, referenceAudioUrls }) {
   const imageUrl = firstLocalOutput(referenceImageUrls);
@@ -1113,6 +1291,91 @@ async function downloadVideo(url, kind) {
   };
 }
 
+async function downloadImage(url, kind, mimeTypeHint = "") {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Could not download generated image: ${response.status} ${response.statusText}`);
+  }
+
+  const mimeType = normalizeMimeType(mimeTypeHint || response.headers.get("content-type") || "image/png");
+  const extension = imageExtensionForUrl(url, mimeType);
+  const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${kind}${extension}`;
+  const outputPath = path.join(outputsDir, fileName);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await writeFile(outputPath, bytes);
+
+  return {
+    fileName,
+    publicPath: `/outputs/${fileName}`,
+    bytes: bytes.length,
+    mimeType
+  };
+}
+
+function imageExtensionForUrl(url, mimeType) {
+  const extension = path.extname(new URL(url).pathname).toLowerCase();
+  if ([".jpg", ".jpeg", ".png", ".webp"].includes(extension)) return extension;
+  return extensionForMime(mimeType);
+}
+
+function normalizeMimeType(value) {
+  return String(value || "image/png").split(";")[0].trim().toLowerCase() || "image/png";
+}
+
+function normalizeFalFile(value) {
+  if (!value) return null;
+  if (typeof value === "string") return { url: value };
+  if (typeof value.url === "string") return value;
+  if (typeof value.file_url === "string") return { ...value, url: value.file_url };
+  if (typeof value.image_url === "string") return { ...value, url: value.image_url };
+  if (typeof value.download_url === "string") return { ...value, url: value.download_url };
+  if (typeof value.public_url === "string") return { ...value, url: value.public_url };
+  return null;
+}
+
+function firstFalImageResult(data) {
+  const knownResult =
+    normalizeFalFile(data?.image) ||
+    normalizeFalFile(data?.output_image) ||
+    normalizeFalFile(data?.segmented_image) ||
+    normalizeFalFile(data?.masked_image) ||
+    normalizeFalFile(data?.mask_image) ||
+    normalizeFalFile(data?.masks?.[0]) ||
+    normalizeFalFile(data?.mask) ||
+    normalizeFalFile(data?.images?.[0]) ||
+    normalizeFalFile(data?.outputs?.[0]) ||
+    normalizeFalFile(data?.result);
+
+  return knownResult || findFalMediaFile(data, "image/");
+}
+
+function findFalMediaFile(value, mimePrefix, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return null;
+  seen.add(value);
+
+  const file = normalizeFalFile(value);
+  if (file && falFileMatchesMedia(file, mimePrefix)) return file;
+
+  for (const child of Object.values(value)) {
+    const found = findFalMediaFile(child, mimePrefix, seen);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function falFileMatchesMedia(file, mimePrefix) {
+  const contentType = String(file.content_type || file.mimeType || file.mime_type || "").toLowerCase();
+  if (contentType.startsWith(mimePrefix)) return true;
+
+  if (mimePrefix === "image/") {
+    const fileName = String(file.file_name || file.fileName || file.name || file.url || "").toLowerCase();
+    return [".jpg", ".jpeg", ".png", ".webp"].some((extension) => fileName.includes(extension));
+  }
+
+  return false;
+}
+
 async function readHistory() {
   if (!existsSync(historyPath)) {
     return [];
@@ -1189,6 +1452,34 @@ function estimateAuroraCost({ endpoint, resolution, duration }) {
     mediaType: "video",
     resolution,
     pricingBasis: "Creatify Aurora fal.ai request; local price estimate not configured",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
+function estimateSam3ImageCost({ endpoint }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: 1,
+    unit: "request",
+    mediaType: "image",
+    pricingBasis: "SAM 3 image segmentation fal.ai request; local price estimate not configured",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
+function estimateSam3VideoCost({ endpoint }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: 0.005,
+    units: null,
+    unit: "16 frames",
+    mediaType: "video",
+    pricingBasis: "SAM 3 video segmentation fal.ai pricing estimate at $0.005 per 16 frames; local frame count unavailable",
     pricingSource: "fal-model-page-2026-05-12",
     endpoint
   };
@@ -1496,6 +1787,22 @@ async function writeNodeProjects(projects) {
 
 function resolveImageModel(model) {
   const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("image")) {
+    if (!sam3SegmentationModelsEnabled) {
+      return {
+        provider: "disabled",
+        displayName: "SAM 3 Image",
+        id: "fal-ai/sam-3/image"
+      };
+    }
+
+    return {
+      provider: "fal-sam3-image",
+      displayName: "SAM 3 Image",
+      id: "fal-ai/sam-3/image"
+    };
+  }
+
   if (normalized.includes("openai") || normalized.includes("gpt-image-2") || normalized.includes("image 2")) {
     return {
       provider: "openai",
@@ -1513,6 +1820,24 @@ function resolveImageModel(model) {
 
 function resolveVideoModel(model) {
   const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("video")) {
+    if (!sam3SegmentationModelsEnabled) {
+      return {
+        provider: "disabled",
+        displayName: "SAM 3 Video",
+        id: "fal-ai/sam-3/video",
+        speed: "sam3"
+      };
+    }
+
+    return {
+      provider: "fal-sam3-video",
+      displayName: "SAM 3 Video",
+      id: "fal-ai/sam-3/video",
+      speed: "sam3"
+    };
+  }
+
   if (normalized.includes("aurora") || normalized.includes("creatify")) {
     return {
       provider: "fal-aurora",
