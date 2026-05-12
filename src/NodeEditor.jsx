@@ -178,7 +178,8 @@ const imageRunStaggerMs = 850;
 const videoModelNames = {
   seedance: "Seedance 2.0",
   seedanceFast: "Seedance 2.0 Fast",
-  wanFunControl: "Wan Fun Control"
+  wanFunControl: "Wan Fun Control",
+  aurora: "Creatify Aurora"
 };
 
 export default function NodeEditor() {
@@ -1139,8 +1140,8 @@ export default function NodeEditor() {
 
     if (source?.type === "style") {
       if ((source.data.stylePreset || "None") === "None") return "Choose a Style preset before connecting";
-      if (target.type === "imageModel" && to.port === "styleIn") return "";
-      return "Style presets connect to the Image Model style input";
+      if ((target.type === "imageModel" || target.type === "text") && to.port === "styleIn") return "";
+      return "Style presets connect to Style inputs";
     }
 
     if (source.type === "transfer") {
@@ -1168,6 +1169,11 @@ export default function NodeEditor() {
       if (to.port === "videoIn") {
         if (["video", "videoModel"].includes(source.type)) return "";
         return "Video input accepts video outputs";
+      }
+
+      if (to.port === "styleIn") {
+        if (source.type === "style") return "";
+        return "Style input accepts style outputs";
       }
     }
 
@@ -2082,16 +2088,18 @@ function NodeBody({
     const textPort = config.input.find((port) => port.id === "textIn");
     const imagePort = config.input.find((port) => port.id === "imageIn");
     const videoPort = config.input.find((port) => port.id === "videoIn");
+    const stylePort = config.input.find((port) => port.id === "styleIn");
     const hasRunInput =
       Boolean(String(node.data.text || "").trim()) ||
       Boolean(incoming.textIn?.length) ||
       Boolean(incoming.imageIn?.length) ||
-      Boolean(incoming.videoIn?.length);
+      Boolean(incoming.videoIn?.length) ||
+      Boolean(incoming.styleIn?.length);
     return (
       <div className="node-body text-node-body">
         <OutputPortRow node={node} port={outputPort} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         <div className="text-input-port-stack" aria-label="Text node inputs">
-          {[textPort, imagePort, videoPort].filter(Boolean).map((port) => (
+          {[textPort, imagePort, videoPort, stylePort].filter(Boolean).map((port) => (
             <PortHandle
               key={port.id}
               node={node}
@@ -2400,10 +2408,13 @@ function NodeBody({
   const referenceVideoPort = config.input.find((port) => port.id === "referenceVideoIn");
   const referenceAudioPort = config.input.find((port) => port.id === "referenceAudioIn");
   const isWanFunControl = isWanFunControlModel(node.data.model);
+  const isAurora = isAuroraModel(node.data.model);
   const settingsOpen = Boolean(node.data.settingsOpen);
   const collapsedPorts = isWanFunControl
     ? [promptPort, referenceVideoPort, referenceImagePort]
-    : [promptPort, startFramePort, endFramePort, referenceImagePort, referenceVideoPort, referenceAudioPort];
+    : isAurora
+      ? [promptPort, referenceImagePort, referenceAudioPort]
+      : [promptPort, startFramePort, endFramePort, referenceImagePort, referenceVideoPort, referenceAudioPort];
   return (
     <div className="node-body model-node-body video-model-body">
       <ResultPane
@@ -2442,6 +2453,7 @@ function NodeBody({
             <option>{videoModelNames.seedance}</option>
             <option>{videoModelNames.seedanceFast}</option>
             <option>{videoModelNames.wanFunControl}</option>
+            <option>{videoModelNames.aurora}</option>
           </select>
         </NodeRow>
         <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -2508,6 +2520,21 @@ function NodeBody({
               <input value={node.data.seed || ""} onChange={(event) => onUpdate(node.id, { seed: event.target.value })} placeholder="Random" />
             </NodeRow>
           </>
+        ) : isAurora ? (
+          <>
+            <NodeRow label="Image" inputPort={settingsOpen ? referenceImagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceImageIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceImageIn, "Add image")}</button>
+            </NodeRow>
+            <NodeRow label="Audio" inputPort={settingsOpen ? referenceAudioPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceAudioIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceAudioIn, "Add audio")}</button>
+            </NodeRow>
+            <NodeRow label="Resolution">
+              <select value={node.data.resolution} onChange={(event) => onUpdate(node.id, { resolution: event.target.value })}>
+                <option>720p</option>
+                <option>480p</option>
+              </select>
+            </NodeRow>
+          </>
         ) : (
           <>
             <NodeRow label="Start Frame" inputPort={settingsOpen ? startFramePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -2555,6 +2582,7 @@ function NodeBody({
           </>
         )}
       </details>
+      {isAurora && <small className="upload-status model-status-note">lipsync model</small>}
     </div>
   );
 }
@@ -2625,7 +2653,8 @@ function getNodeConfig(type) {
       input: [
         { id: "textIn", label: "Text", color: portColors.prompt },
         { id: "imageIn", label: "Image", color: portColors.image },
-        { id: "videoIn", label: "Video", color: portColors.video }
+        { id: "videoIn", label: "Video", color: portColors.video },
+        { id: "styleIn", label: "Style", color: portColors.style }
       ],
       output: [{ id: "promptOut", label: "Prompt", color: portColors.prompt }]
     },
@@ -2743,6 +2772,11 @@ function isWanFunControlModel(model) {
   return String(model || "").toLowerCase().includes("wan");
 }
 
+function isAuroraModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("aurora") || normalized.includes("creatify");
+}
+
 function configTitleFallback(type) {
   return nodeCatalog.find((item) => item.type === type)?.label || "Node";
 }
@@ -2828,6 +2862,15 @@ function connectedTextInputItems(items = []) {
     .filter((item) => item.text);
 }
 
+function connectedStyleInputItems(items = []) {
+  return items
+    .map(({ source }) => ({
+      label: `Style: ${sourceLabel(source)}`,
+      text: promptPiecesForSource(source).join("\n\n")
+    }))
+    .filter((item) => item.text);
+}
+
 function connectedMediaInputItems(items = [], mediaType) {
   return items
     .map(({ source }) => {
@@ -2847,7 +2890,7 @@ async function runTextNodeProcessing({ node, incoming, projectId, projectName })
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       text: node.data.text,
-      textInputs: connectedTextInputItems(incoming.textIn),
+      textInputs: [...connectedTextInputItems(incoming.textIn), ...connectedStyleInputItems(incoming.styleIn)],
       imageInputs: connectedMediaInputItems(incoming.imageIn, "image"),
       videoInputs: connectedMediaInputItems(incoming.videoIn, "video"),
       projectId,

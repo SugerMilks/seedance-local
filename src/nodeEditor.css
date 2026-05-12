@@ -1242,6 +1242,14 @@
   background: rgba(221, 198, 49, 0.08);
 }
 
+.model-status-note {
+  display: block;
+  margin-top: 8px;
+  color: #ddc631;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .node-card details {
   margin-top: 12px;
 }

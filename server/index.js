@@ -517,6 +517,14 @@ app.post("/api/node/generate-video", async (req, res) => {
       });
     }
 
+    if (selectedVideoModel.provider === "fal-aurora") {
+      return runAuroraVideo(req, res, {
+        prompt,
+        referenceImageUrls: Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [],
+        referenceAudioUrls: Array.isArray(req.body.referenceAudioUrls) ? req.body.referenceAudioUrls.filter(isLocalAssetUrl) : []
+      });
+    }
+
     const speed = selectedVideoModel.speed;
     const speedPrefix = speed === "fast" ? "fast/" : "";
     const startFrameUrl = firstLocalOutput(req.body.startFrameUrls);
@@ -619,6 +627,71 @@ app.post("/api/node/generate-video", async (req, res) => {
     res.status(500).json({ error: error.message || "Video generation failed." });
   }
 });
+
+async function runAuroraVideo(req, res, { prompt, referenceImageUrls, referenceAudioUrls }) {
+  const imageUrl = firstLocalOutput(referenceImageUrls);
+  if (!imageUrl) {
+    return res.status(400).json({ error: "Creatify Aurora requires a connected image." });
+  }
+
+  const audioUrl = firstLocalOutput(referenceAudioUrls);
+  if (!audioUrl) {
+    return res.status(400).json({ error: "Creatify Aurora requires a connected audio file." });
+  }
+
+  const endpoint = "fal-ai/creatify/aurora";
+  const resolution = normalizeChoice(req.body.resolution, ["480p", "720p"], "720p");
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    audio_url: await uploadLocalOutputToFal(audioUrl),
+    prompt,
+    resolution
+  };
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = result?.data?.video;
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "creatify-aurora");
+  const cost = estimateAuroraCost({ endpoint, resolution, duration: remoteVideo.duration });
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: "Creatify Aurora",
+    endpoint,
+    mode: "Aurora lipsync image and audio to video",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      resolution,
+      imageCount: 1,
+      audioCount: 1
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
 
 async function runWanFunControlVideo(req, res, { prompt, referenceImageUrls, referenceVideoUrls }) {
   const controlVideoUrl = firstLocalOutput(referenceVideoUrls);
@@ -1106,6 +1179,21 @@ function estimateWanFunControlCost({ endpoint, matchInputNumFrames, numFrames, m
   };
 }
 
+function estimateAuroraCost({ endpoint, resolution, duration }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: duration || null,
+    unit: "request",
+    mediaType: "video",
+    resolution,
+    pricingBasis: "Creatify Aurora fal.ai request; local price estimate not configured",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
 function estimateImageCost({ resolution }) {
   const normalized = String(resolution || "2K").toUpperCase();
   const amountUsd = normalized.includes("4K") ? nanoBananaCost4K : nanoBananaCost1K2K;
@@ -1425,6 +1513,15 @@ function resolveImageModel(model) {
 
 function resolveVideoModel(model) {
   const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("aurora") || normalized.includes("creatify")) {
+    return {
+      provider: "fal-aurora",
+      displayName: "Creatify Aurora",
+      id: "fal-ai/creatify/aurora",
+      speed: "aurora"
+    };
+  }
+
   if (normalized.includes("wan")) {
     return {
       provider: "fal-wan-fun-control",
