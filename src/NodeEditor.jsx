@@ -214,6 +214,7 @@ export default function NodeEditor() {
   const connectedPortKeys = React.useMemo(() => buildConnectedPortKeys(edges), [edges]);
   const selectedNodeSet = React.useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const activeEdgeIds = React.useMemo(() => buildActiveEdgeIds(nodes, edges), [nodes, edges]);
+  const inactiveEdgeIds = React.useMemo(() => buildInactiveEdgeIds(nodes, edges), [nodes, edges]);
   const selectedRunnableNodes = React.useMemo(
     () => nodes.filter((node) => selectedNodeSet.has(node.id) && isRunnableNode(node) && node.data.status !== "running"),
     [nodes, selectedNodeSet]
@@ -765,8 +766,6 @@ export default function NodeEditor() {
       status: "ready",
       error: ""
     });
-    setEdges((current) => current.filter((edge) => edge.from.nodeId !== nodeId));
-    setSelectedEdgeId(null);
   }
 
   function startNodeDrag(event, node) {
@@ -1662,6 +1661,7 @@ export default function NodeEditor() {
                   color={edge.color}
                   selected={selectedEdgeId === edge.id}
                   active={activeEdgeIds.has(edge.id)}
+                  inactive={inactiveEdgeIds.has(edge.id)}
                   onSelect={selectEdge}
                 />
               );
@@ -1723,11 +1723,11 @@ export default function NodeEditor() {
   );
 }
 
-function EdgePath({ edgeId, from, to, color, draft, selected, active, onSelect }) {
+function EdgePath({ edgeId, from, to, color, draft, selected, active, inactive, onSelect }) {
   const curve = Math.max(80, Math.abs(to.x - from.x) * 0.42);
   const path = `M ${from.x} ${from.y} C ${from.x + curve} ${from.y}, ${to.x - curve} ${to.y}, ${to.x} ${to.y}`;
   return (
-    <g className={`edge-path ${draft ? "draft" : ""} ${selected ? "selected" : ""} ${active ? "active" : ""}`}>
+    <g className={`edge-path ${draft ? "draft" : ""} ${selected ? "selected" : ""} ${active ? "active" : ""} ${inactive ? "inactive" : ""}`}>
       <path className="edge-visible" d={path} stroke={color} strokeWidth={draft ? 3 : 4} fill="none" opacity={draft ? 0.62 : 0.42} strokeLinecap="round" />
       {!draft && (
         <path
@@ -2195,9 +2195,11 @@ function NodeBody({
   if (node.type === "transfer") {
     const transferImages = Array.isArray(node.data.transferImages) ? node.data.transferImages : [];
     const canAddImages = !node.data.locked && transferImages.length < maxTransferImages;
+    const hasTransferOutput = node.data.activated && node.data.resultUrl;
+    const outputConnected = connectedPortKeys.has(`${node.id}:${outputPort.id}`);
     return (
       <div className="node-body style-node-body">
-        {node.data.activated && node.data.resultUrl ? (
+        {hasTransferOutput || outputConnected ? (
           <OutputPortRow node={node} port={outputPort} label="TRANSFER.png" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         ) : (
           <div className="style-output-placeholder">Lock transfer to enable output</div>
@@ -2788,6 +2790,18 @@ function buildConnectedPortKeys(edges) {
 function buildActiveEdgeIds(nodes, edges) {
   const activeNodeIds = new Set(nodes.filter((node) => node.data?.status === "running").map((node) => node.id));
   return new Set(edges.filter((edge) => activeNodeIds.has(edge.to.nodeId)).map((edge) => edge.id));
+}
+
+function buildInactiveEdgeIds(nodes, edges) {
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  return new Set(
+    edges
+      .filter((edge) => {
+        const source = nodeMap.get(edge.from.nodeId);
+        return source?.type === "transfer" && (!source.data?.locked || !source.data?.activated || !source.data?.resultUrl);
+      })
+      .map((edge) => edge.id)
+  );
 }
 
 function connectedText(items = []) {

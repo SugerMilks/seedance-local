@@ -254,6 +254,19 @@
   stroke-width: 5px;
 }
 
+.edge-path.inactive .edge-visible {
+  stroke: #7a7a7a;
+  opacity: 0.24;
+  stroke-dasharray: 6 10;
+  animation: none;
+  filter: none;
+}
+
+.edge-path.inactive.selected .edge-visible {
+  opacity: 0.52;
+  stroke-width: 5px;
+}
+
 @keyframes edge-flow {
   to {
     stroke-dashoffset: -20;
