@@ -15,6 +15,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Palette,
+  Play,
   Plus,
   Save,
   Trash2,
@@ -169,6 +170,16 @@ const minZoom = 0.35;
 const maxZoom = 1.9;
 const nodeDraftStorageKey = "seedance-node-editor-draft-v1";
 const previewBaseWidth = 330;
+const groupPalette = ["#3d85ff", "#f0c83b", "#58ce63", "#9b5cff", "#ff4fb3", "#ff8b35"];
+const groupPadding = { x: 42, top: 62, bottom: 42 };
+const groupMinWidth = 260;
+const groupMinHeight = 190;
+const imageRunStaggerMs = 850;
+const videoModelNames = {
+  seedance: "Seedance 2.0",
+  seedanceFast: "Seedance 2.0 Fast",
+  wanFunControl: "Wan Fun Control"
+};
 
 export default function NodeEditor() {
   const canvasRef = React.useRef(null);
@@ -177,11 +188,15 @@ export default function NodeEditor() {
   const undoStackRef = React.useRef([]);
   const clipboardRef = React.useRef(null);
   const savedDraft = React.useMemo(loadNodeEditorDraft, []);
+  const nodesRef = React.useRef(savedDraft.nodes);
+  const edgesRef = React.useRef(savedDraft.edges);
   const [nodes, setNodes] = React.useState(savedDraft.nodes);
   const [edges, setEdges] = React.useState(savedDraft.edges);
+  const [groups, setGroups] = React.useState(savedDraft.groups);
   const [dragState, setDragState] = React.useState(null);
   const [draftEdge, setDraftEdge] = React.useState(null);
   const [portPositions, setPortPositions] = React.useState({});
+  const [selectionBounds, setSelectionBounds] = React.useState(null);
   const [viewport, setViewport] = React.useState(savedDraft.viewport);
   const [selectedNodeIds, setSelectedNodeIds] = React.useState([]);
   const [projectName, setProjectName] = React.useState(savedDraft.projectName);
@@ -193,15 +208,34 @@ export default function NodeEditor() {
   const [toolbarCollapsed, setToolbarCollapsed] = React.useState(true);
   const [saveStatus, setSaveStatus] = React.useState("");
   const [compilingTransferNodeId, setCompilingTransferNodeId] = React.useState(null);
+  const [selectedEdgeId, setSelectedEdgeId] = React.useState(null);
 
   const incomingByNode = React.useMemo(() => buildIncomingByNode(nodes, edges), [nodes, edges]);
   const connectedPortKeys = React.useMemo(() => buildConnectedPortKeys(edges), [edges]);
   const selectedNodeSet = React.useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
+  const activeEdgeIds = React.useMemo(() => buildActiveEdgeIds(nodes, edges), [nodes, edges]);
+  const selectedRunnableNodes = React.useMemo(
+    () => nodes.filter((node) => selectedNodeSet.has(node.id) && isRunnableNode(node) && node.data.status !== "running"),
+    [nodes, selectedNodeSet]
+  );
   const selectedProjectName = projects.find((project) => project.id === projectId)?.name;
+
+  React.useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  React.useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
 
   React.useLayoutEffect(() => {
     updatePortPositions();
-  }, [nodes, viewport]);
+    updateSelectionBounds();
+  }, [nodes, viewport, selectedNodeIds]);
+
+  React.useLayoutEffect(() => {
+    syncGroupMembership();
+  }, [nodes, groups, viewport]);
 
   React.useEffect(() => {
     loadProjects();
@@ -214,6 +248,7 @@ export default function NodeEditor() {
         JSON.stringify({
           nodes,
           edges,
+          groups,
           viewport,
           projectId,
           projectName,
@@ -223,13 +258,19 @@ export default function NodeEditor() {
     } catch {
       // Local persistence should never interrupt the node editor.
     }
-  }, [nodes, edges, viewport, projectId, projectName, savedProjectName]);
+  }, [nodes, edges, groups, viewport, projectId, projectName, savedProjectName]);
 
   React.useEffect(() => {
     const handleResize = () => updatePortPositions();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, [viewport]);
+
+  React.useEffect(() => {
+    if (selectedEdgeId && !edges.some((edge) => edge.id === selectedEdgeId)) {
+      setSelectedEdgeId(null);
+    }
+  }, [edges, selectedEdgeId]);
 
   React.useEffect(() => {
     function handleKeyDown(event) {
@@ -262,8 +303,14 @@ export default function NodeEditor() {
         return;
       }
 
-      if (!selectedNodeIds.length) return;
       if (event.key === "Backspace" || event.key === "Delete") {
+        if (selectedEdgeId) {
+          event.preventDefault();
+          removeEdges([selectedEdgeId]);
+          return;
+        }
+
+        if (!selectedNodeIds.length) return;
         event.preventDefault();
         removeNodes(selectedNodeIds);
       }
@@ -271,7 +318,7 @@ export default function NodeEditor() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNodeIds, nodes, edges, viewport, projectId, projectName, savedProjectName, selectedProjectName]);
+  }, [selectedNodeIds, selectedEdgeId, nodes, edges, groups, viewport, projectId, projectName, savedProjectName, selectedProjectName]);
 
   React.useEffect(() => {
     function handlePointerDown(event) {
@@ -344,10 +391,57 @@ export default function NodeEditor() {
     setPortPositions(nextPositions);
   }
 
+  function updateSelectionBounds() {
+    if (selectedNodeIds.length < 2) {
+      setSelectionBounds(null);
+      return;
+    }
+
+    setSelectionBounds(getNodeSetBounds(selectedNodeIds));
+  }
+
+  function getNodeSetBounds(nodeIds) {
+    const bounds = nodeIds.map(getNodeBounds).filter((rect) => rect.right > rect.left && rect.bottom > rect.top);
+    if (!bounds.length) return null;
+
+    const left = Math.min(...bounds.map((rect) => rect.left));
+    const top = Math.min(...bounds.map((rect) => rect.top));
+    const right = Math.max(...bounds.map((rect) => rect.right));
+    const bottom = Math.max(...bounds.map((rect) => rect.bottom));
+
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: right - left,
+      height: bottom - top
+    };
+  }
+
+  function syncGroupMembership() {
+    if (!groups.length || !canvasRef.current) return;
+
+    setGroups((current) => {
+      let changed = false;
+      const nextGroups = current.map((group) => {
+        const nodeIds = getNodeIdsInsideGroup(group);
+        const nextNodeIds = nodeIds;
+
+        if (sameStringList(group.nodeIds || [], nextNodeIds)) return group;
+        changed = true;
+        return { ...group, nodeIds: nextNodeIds };
+      });
+
+      return changed ? nextGroups : current;
+    });
+  }
+
   function addNode(type, position) {
     const count = nodes.filter((node) => node.type === type).length + 1;
     const spec = nodeCatalog.find((item) => item.type === type);
     pushUndoSnapshot();
+    setSelectedEdgeId(null);
     setNodes((current) => [
       ...current,
       {
@@ -371,12 +465,117 @@ export default function NodeEditor() {
     const ids = new Set(nodeIds);
     setNodes((current) => current.filter((node) => !ids.has(node.id)));
     setEdges((current) => current.filter((edge) => !ids.has(edge.from.nodeId) && !ids.has(edge.to.nodeId)));
+    setGroups((current) =>
+      current.map((group) => ({ ...group, nodeIds: (group.nodeIds || []).filter((id) => !ids.has(id)) })).filter((group) => group.nodeIds.length)
+    );
     setSelectedNodeIds((current) => current.filter((id) => !ids.has(id)));
+    setSelectedEdgeId((current) => {
+      const edge = edges.find((item) => item.id === current);
+      return edge && (ids.has(edge.from.nodeId) || ids.has(edge.to.nodeId)) ? null : current;
+    });
+  }
+
+  function removeEdges(edgeIds) {
+    if (!edgeIds.length) return;
+    pushUndoSnapshot();
+    const ids = new Set(edgeIds);
+    setEdges((current) => current.filter((edge) => !ids.has(edge.id)));
+    setSelectedEdgeId(null);
+    setSaveStatus(`${edgeIds.length} connection${edgeIds.length === 1 ? "" : "s"} deleted`);
+  }
+
+  function createGroupFromSelection() {
+    if (selectedNodeIds.length < 2) return;
+
+    const bounds = getNodeSetBounds(selectedNodeIds);
+    if (!bounds) {
+      setSaveStatus("Could not find selected node bounds");
+      return;
+    }
+
+    pushUndoSnapshot();
+    const color = groupPalette[groups.length % groupPalette.length];
+    const group = {
+      id: `group-${Date.now()}`,
+      name: `Group ${groups.length + 1}`,
+      color,
+      x: Math.round(bounds.left - groupPadding.x),
+      y: Math.round(bounds.top - groupPadding.top),
+      width: Math.round(Math.max(groupMinWidth, bounds.width + groupPadding.x * 2)),
+      height: Math.round(Math.max(groupMinHeight, bounds.height + groupPadding.top + groupPadding.bottom)),
+      nodeIds: [...selectedNodeIds]
+    };
+
+    setGroups((current) => [...current, group]);
+    setSelectedEdgeId(null);
+    setSaveStatus(`Grouped ${selectedNodeIds.length} nodes`);
+  }
+
+  function updateGroup(groupId, patch) {
+    setGroups((current) => current.map((group) => (group.id === groupId ? { ...group, ...patch } : group)));
+  }
+
+  function removeGroup(groupId) {
+    pushUndoSnapshot();
+    setGroups((current) => current.filter((group) => group.id !== groupId));
+    setSaveStatus("Group removed");
+  }
+
+  function startGroupDrag(event, group) {
+    if (event.target.closest("input, textarea, select, button, .group-resize-handle")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    pushUndoSnapshot();
+
+    const groupNodeIds = getNodeIdsInsideGroup(group);
+    const movableNodeIds = groupNodeIds;
+    const nodeSet = new Set(movableNodeIds);
+    const pointer = screenToScene(event.clientX, event.clientY);
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedNodeIds(movableNodeIds);
+    setSelectedEdgeId(null);
+    updateGroup(group.id, { nodeIds: movableNodeIds });
+    setDragState({
+      type: "group",
+      groupId: group.id,
+      startPointer: pointer,
+      group: {
+        x: group.x,
+        y: group.y
+      },
+      nodes: nodes
+        .filter((node) => nodeSet.has(node.id))
+        .map((node) => ({
+          id: node.id,
+          x: node.x,
+          y: node.y
+        }))
+    });
+  }
+
+  function startGroupResize(event, group) {
+    event.preventDefault();
+    event.stopPropagation();
+    pushUndoSnapshot();
+    const pointer = screenToScene(event.clientX, event.clientY);
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedEdgeId(null);
+    setDragState({
+      type: "groupResize",
+      groupId: group.id,
+      startPointer: pointer,
+      group: {
+        width: group.width,
+        height: group.height
+      }
+    });
   }
 
   function updateNode(nodeId, patch) {
-    setNodes((current) =>
-      current.map((node) =>
+    setNodes((current) => {
+      const nextNodes = current.map((node) =>
         node.id === nodeId
           ? {
               ...node,
@@ -386,8 +585,10 @@ export default function NodeEditor() {
               }
             }
           : node
-      )
-    );
+      );
+      nodesRef.current = nextNodes;
+      return nextNodes;
+    });
   }
 
   async function uploadMediaAsset(node, file) {
@@ -495,6 +696,7 @@ export default function NodeEditor() {
       error: ""
     });
     setEdges((current) => current.filter((edge) => edge.from.nodeId !== nodeId));
+    setSelectedEdgeId(null);
   }
 
   function startPreviewResize(event, node) {
@@ -564,10 +766,11 @@ export default function NodeEditor() {
       error: ""
     });
     setEdges((current) => current.filter((edge) => edge.from.nodeId !== nodeId));
+    setSelectedEdgeId(null);
   }
 
   function startNodeDrag(event, node) {
-    if (event.target.closest("input, textarea, select, button, label, .preview-resize-handle")) return;
+    if (event.target.closest("input, textarea, select, button, label, summary, details, .preview-resize-handle")) return;
     event.stopPropagation();
     const selectedIds = selectNodeForDrag(node.id, event.shiftKey);
     pushUndoSnapshot();
@@ -617,6 +820,54 @@ export default function NodeEditor() {
       );
     }
 
+    if (dragState?.type === "group") {
+      const deltaX = pointer.x - dragState.startPointer.x;
+      const deltaY = pointer.y - dragState.startPointer.y;
+      const dragged = new Map(dragState.nodes.map((item) => [item.id, item]));
+
+      setGroups((current) =>
+        current.map((group) =>
+          group.id === dragState.groupId
+            ? {
+                ...group,
+                x: dragState.group.x + deltaX,
+                y: dragState.group.y + deltaY
+              }
+            : group
+        )
+      );
+      setNodes((current) =>
+        current.map((node) => {
+          const start = dragged.get(node.id);
+          return start
+            ? {
+                ...node,
+                x: start.x + deltaX,
+                y: start.y + deltaY
+              }
+            : node;
+        })
+      );
+      return;
+    }
+
+    if (dragState?.type === "groupResize") {
+      const deltaX = pointer.x - dragState.startPointer.x;
+      const deltaY = pointer.y - dragState.startPointer.y;
+      setGroups((current) =>
+        current.map((group) =>
+          group.id === dragState.groupId
+            ? {
+                ...group,
+                width: Math.round(clamp(dragState.group.width + deltaX, groupMinWidth, 4200)),
+                height: Math.round(clamp(dragState.group.height + deltaY, groupMinHeight, 3200))
+              }
+            : group
+        )
+      );
+      return;
+    }
+
     if (dragState?.type === "marquee") {
       const rect = normalizeRect(dragState.start, pointer);
       const selected = nodes
@@ -655,12 +906,14 @@ export default function NodeEditor() {
     }
 
     setSelectedNodeIds(nextSelected);
+    setSelectedEdgeId(null);
     return nextSelected;
   }
 
   function startCanvasPointerDown(event) {
     if (!isCanvasSurface(event.target, event.currentTarget)) return;
     setContextMenu(null);
+    setSelectedEdgeId(null);
     const pointer = screenToScene(event.clientX, event.clientY);
 
     if (event.shiftKey) {
@@ -707,6 +960,7 @@ export default function NodeEditor() {
   function startConnection(event, nodeId, port, color) {
     event.preventDefault();
     event.stopPropagation();
+    setSelectedEdgeId(null);
     const pointer = screenToScene(event.clientX, event.clientY);
     const startPoint = getPortPoint(nodeId, port);
     setDraftEdge({
@@ -723,8 +977,17 @@ export default function NodeEditor() {
     event.stopPropagation();
     pushUndoSnapshot();
     setEdges((current) => current.filter((edge) => !(edge.to.nodeId === nodeId && edge.to.port === port)));
+    setSelectedEdgeId(null);
     setDraftEdge(null);
     setSaveStatus("Disconnected input");
+  }
+
+  function selectEdge(event, edgeId) {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedNodeIds([]);
+    setSelectedEdgeId(edgeId);
+    setContextMenu(null);
   }
 
   function handleCanvasWheel(event) {
@@ -790,6 +1053,23 @@ export default function NodeEditor() {
       right: (rect.right - canvasRect.left - viewport.x) / viewport.scale,
       bottom: (rect.bottom - canvasRect.top - viewport.y) / viewport.scale
     };
+  }
+
+  function getNodeIdsInsideGroup(group) {
+    const groupRect = groupToRect(group);
+    return nodes
+      .filter((node) => {
+        const bounds = getNodeBounds(node.id);
+        if (bounds.right > bounds.left && bounds.bottom > bounds.top) {
+          return pointInRect(groupRect, {
+            x: (bounds.left + bounds.right) / 2,
+            y: (bounds.top + bounds.bottom) / 2
+          });
+        }
+
+        return pointInRect(groupRect, node);
+      })
+      .map((node) => node.id);
   }
 
   function finishConnection(event) {
@@ -875,6 +1155,23 @@ export default function NodeEditor() {
       return "Preview accepts image and video sources";
     }
 
+    if (target?.type === "text") {
+      if (to.port === "textIn") {
+        if (["text", "imageModel", "videoModel"].includes(source.type)) return "";
+        return "Text input accepts text outputs";
+      }
+
+      if (to.port === "imageIn") {
+        if (["image", "imageModel", "transfer"].includes(source.type)) return "";
+        return "Image input accepts image outputs";
+      }
+
+      if (to.port === "videoIn") {
+        if (["video", "videoModel"].includes(source.type)) return "";
+        return "Video input accepts video outputs";
+      }
+    }
+
     return "";
   }
 
@@ -885,7 +1182,7 @@ export default function NodeEditor() {
   function pushUndoSnapshot() {
     undoStackRef.current = [
       ...undoStackRef.current.slice(-39),
-      cloneGraphState({ nodes, edges, viewport, selectedNodeIds })
+      cloneGraphState({ nodes, edges, groups, viewport, selectedNodeIds, selectedEdgeId })
     ];
   }
 
@@ -898,8 +1195,10 @@ export default function NodeEditor() {
 
     setNodes(previous.nodes);
     setEdges(previous.edges);
+    setGroups(previous.groups || []);
     setViewport(previous.viewport);
     setSelectedNodeIds(previous.selectedNodeIds);
+    setSelectedEdgeId(previous.selectedEdgeId || null);
     setSaveStatus("Undone");
   }
 
@@ -954,6 +1253,7 @@ export default function NodeEditor() {
     setNodes((current) => [...current, ...pastedNodes]);
     setEdges((current) => [...current, ...pastedEdges]);
     setSelectedNodeIds(pastedNodes.map((node) => node.id));
+    setSelectedEdgeId(null);
     setSaveStatus(`${pastedNodes.length} node${pastedNodes.length === 1 ? "" : "s"} pasted`);
   }
 
@@ -987,6 +1287,7 @@ export default function NodeEditor() {
           name: cleanProjectName,
           nodes,
           edges,
+          groups,
           viewport
         })
       });
@@ -1003,14 +1304,16 @@ export default function NodeEditor() {
   }
 
   function applyWorkflow(project, sourceLabel = "Loaded") {
-    const graph = normalizeEditorGraph(project.graph?.nodes || [], project.graph?.edges || []);
+    const graph = normalizeEditorGraph(project.graph?.nodes || [], project.graph?.edges || [], project.graph?.groups || []);
     setProjectId(project.id || null);
     setProjectName(project.name || "Untitled node project");
     setSavedProjectName(project.name || null);
     setNodes(graph.nodes);
     setEdges(graph.edges);
+    setGroups(graph.groups);
     setViewport(project.graph?.viewport || { x: 0, y: 0, scale: 1 });
     setSelectedNodeIds([]);
+    setSelectedEdgeId(null);
     setProjectMenuOpen(false);
     setSaveStatus(project.fileName ? `${sourceLabel} ${project.fileName}` : sourceLabel);
   }
@@ -1080,50 +1383,53 @@ export default function NodeEditor() {
   }
 
   async function runNode(node) {
-    if (node.type !== "text" && node.type !== "imageModel" && node.type !== "videoModel") return;
-    if (node.data.status === "running") return;
+    const currentNode = nodesRef.current.find((item) => item.id === node.id) || node;
+    if (!isRunnableNode(currentNode)) return { status: "skipped" };
+    if (currentNode.data.status === "running") return { status: "skipped" };
 
-    const incoming = incomingByNode[node.id] || {};
-    const basePrompt = connectedText(incoming.promptIn) || node.data.prompt;
-    const batchCount = nodeBatchCount(node);
+    const currentIncomingByNode = buildIncomingByNode(nodesRef.current, edgesRef.current);
+    const incoming = currentIncomingByNode[currentNode.id] || {};
+    const basePrompt = connectedText(incoming.promptIn) || currentNode.data.prompt;
+    const batchCount = nodeBatchCount(currentNode);
 
     try {
       const runningPatch =
-        node.type === "text"
+        currentNode.type === "text"
           ? { status: "running", error: "" }
           : { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 };
-      updateNode(node.id, runningPatch);
+      updateNode(currentNode.id, runningPatch);
 
-      if (node.type === "text") {
-        const processed = await runTextNodeProcessing({ node, incoming, projectId, projectName });
-        updateNode(node.id, {
+      if (currentNode.type === "text") {
+        const processed = await runTextNodeProcessing({ node: currentNode, incoming, projectId, projectName });
+        updateNode(currentNode.id, {
           status: "complete",
           error: "",
           resultText: processed.text,
           lastRunModel: processed.model
         });
-        return;
+        return { status: "complete" };
       }
 
-      if (node.type === "imageModel") {
+      if (currentNode.type === "imageModel") {
         const imagePromptItems = connectedImagePromptItems([...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
-        const prompt = buildEffectiveImagePrompt(basePrompt, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], node.data.aspectRatio);
-        const runs = Array.from({ length: batchCount }, (_, index) =>
+        const prompt = buildEffectiveImagePrompt(basePrompt, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], currentNode.data.aspectRatio);
+        const runIndexes = Array.from({ length: batchCount }, (_, index) => index);
+        const settled = await settleSequential(runIndexes, (index) =>
           runImageModelGeneration({
-            node,
+            node: currentNode,
             prompt,
             imagePromptItems,
             projectId,
             projectName,
             index
-          })
+          }),
+          imageRunStaggerMs
         );
-        const settled = await Promise.allSettled(runs);
         const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
         const failures = settled.filter((item) => item.status === "rejected");
         if (!successes.length) throw new Error(failures[0]?.reason?.message || "Image generation failed.");
 
-        updateNode(node.id, {
+        updateNode(currentNode.id, {
           status: "complete",
           resultUrl: successes[0].url,
           resultItems: successes,
@@ -1131,13 +1437,13 @@ export default function NodeEditor() {
           resultText: successes.map((item) => item.text).filter(Boolean).join("\n\n"),
           error: failures.length ? nodeBatchStatusMessage("image", batchCount, successes.length, failures) : ""
         });
-        return;
+        return { status: "complete" };
       }
 
       const prompt = basePrompt;
       const runs = Array.from({ length: batchCount }, (_, index) =>
         runVideoModelGeneration({
-          node,
+          node: currentNode,
           prompt,
           incoming,
           projectId,
@@ -1150,7 +1456,7 @@ export default function NodeEditor() {
       const failures = settled.filter((item) => item.status === "rejected");
       if (!successes.length) throw new Error(failures[0]?.reason?.message || "Video generation failed.");
 
-      updateNode(node.id, {
+      updateNode(currentNode.id, {
         status: "complete",
         resultUrl: successes[0].url,
         resultItems: successes,
@@ -1158,9 +1464,88 @@ export default function NodeEditor() {
         resultText: "",
         error: failures.length ? nodeBatchStatusMessage("video", batchCount, successes.length, failures) : ""
       });
+      return { status: "complete" };
     } catch (error) {
-      updateNode(node.id, { status: "error", error: error.message });
+      updateNode(currentNode.id, { status: "error", error: error.message });
+      return { status: "error", error };
     }
+  }
+
+  async function runSelectedNodes() {
+    const selectedIds = new Set(selectedNodeIds);
+    const runnable = nodesRef.current.filter((node) => selectedIds.has(node.id) && isRunnableNode(node) && node.data.status !== "running");
+    if (!runnable.length) {
+      setSaveStatus("No runnable selected nodes");
+      return;
+    }
+
+    setSaveStatus(`Running ${runnable.length} selected node${runnable.length === 1 ? "" : "s"}...`);
+    const result = await runNodesByDependencyOrder(runnable);
+    const failedCount = result.failed + result.skipped;
+    setSaveStatus(
+      failedCount
+        ? `Finished ${result.completed} node${result.completed === 1 ? "" : "s"}; ${failedCount} blocked or failed`
+        : `Finished ${result.completed} selected node${result.completed === 1 ? "" : "s"}`
+    );
+  }
+
+  async function runNodesByDependencyOrder(runnableNodes) {
+    const nodeMap = new Map(runnableNodes.map((node) => [node.id, node]));
+    const pending = new Set(nodeMap.keys());
+    const completed = new Set();
+    const failed = new Map();
+    const skipped = new Map();
+    const dependencies = buildSelectedRunnableDependencies(runnableNodes, edgesRef.current);
+
+    while (pending.size) {
+      const blocked = [...pending].filter((nodeId) => (dependencies.get(nodeId) || []).some((dependencyId) => failed.has(dependencyId) || skipped.has(dependencyId)));
+
+      blocked.forEach((nodeId) => {
+        const failedDependencyId = (dependencies.get(nodeId) || []).find((dependencyId) => failed.has(dependencyId) || skipped.has(dependencyId));
+        const message = `Skipped because ${nodeTitle(nodeMap.get(failedDependencyId))} did not complete.`;
+        pending.delete(nodeId);
+        skipped.set(nodeId, message);
+        updateNode(nodeId, { status: "error", error: message });
+      });
+
+      const ready = [...pending].filter((nodeId) => (dependencies.get(nodeId) || []).every((dependencyId) => completed.has(dependencyId)));
+
+      if (!ready.length) {
+        [...pending].forEach((nodeId) => {
+          const message = "Skipped because selected node dependencies could not be resolved.";
+          pending.delete(nodeId);
+          skipped.set(nodeId, message);
+          updateNode(nodeId, { status: "error", error: message });
+        });
+        break;
+      }
+
+      const nextPriority = Math.min(...ready.map((nodeId) => nodeRunPriority(nodeMap.get(nodeId))));
+      const batchIds = ready.filter((nodeId) => nodeRunPriority(nodeMap.get(nodeId)) === nextPriority);
+      const batchNodes = batchIds.map((nodeId) => nodeMap.get(nodeId));
+      setSaveStatus(`Running ${batchNodes.length} ${runStageLabel(batchNodes[0]?.type)} node${batchNodes.length === 1 ? "" : "s"}...`);
+
+      const results = await Promise.all(batchNodes.map((node) => runNode(node)));
+      results.forEach((result, index) => {
+        const nodeId = batchIds[index];
+        pending.delete(nodeId);
+
+        if (result?.status === "error") {
+          failed.set(nodeId, result.error || new Error("Node failed."));
+          return;
+        }
+
+        completed.add(nodeId);
+      });
+
+      await wait(0);
+    }
+
+    return {
+      completed: completed.size,
+      failed: failed.size,
+      skipped: skipped.size
+    };
   }
 
   return (
@@ -1253,11 +1638,33 @@ export default function NodeEditor() {
             transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`
           }}
         >
+          {groups.map((group) => (
+            <GroupBackdrop
+              key={group.id}
+              group={group}
+              onDragStart={startGroupDrag}
+              onResizeStart={startGroupResize}
+              onUpdate={updateGroup}
+              onRemove={removeGroup}
+            />
+          ))}
+
           <svg className="edge-layer">
             {edges.map((edge) => {
               const from = getPortPoint(edge.from.nodeId, edge.from.port);
               const to = getPortPoint(edge.to.nodeId, edge.to.port);
-              return <EdgePath key={edge.id} from={from} to={to} color={edge.color} />;
+              return (
+                <EdgePath
+                  key={edge.id}
+                  edgeId={edge.id}
+                  from={from}
+                  to={to}
+                  color={edge.color}
+                  selected={selectedEdgeId === edge.id}
+                  active={activeEdgeIds.has(edge.id)}
+                  onSelect={selectEdge}
+                />
+              );
             })}
           {draftEdge && <EdgePath from={draftEdge.start} to={{ x: draftEdge.x, y: draftEdge.y }} color={draftEdge.color} draft />}
           {dragState?.type === "marquee" && <SelectionMarquee start={dragState.start} current={dragState.current} />}
@@ -1287,6 +1694,16 @@ export default function NodeEditor() {
             />
           ))}
         </div>
+        {selectionBounds && (
+          <SelectionActionBar
+            bounds={selectionBounds}
+            viewport={viewport}
+            selectedCount={selectedNodeIds.length}
+            runnableCount={selectedRunnableNodes.length}
+            onRunAll={runSelectedNodes}
+            onGroup={createGroupFromSelection}
+          />
+        )}
         {contextMenu && (
           <div className="node-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
             {nodeCatalog.map((item) => {
@@ -1306,10 +1723,25 @@ export default function NodeEditor() {
   );
 }
 
-function EdgePath({ from, to, color, draft }) {
+function EdgePath({ edgeId, from, to, color, draft, selected, active, onSelect }) {
   const curve = Math.max(80, Math.abs(to.x - from.x) * 0.42);
   const path = `M ${from.x} ${from.y} C ${from.x + curve} ${from.y}, ${to.x - curve} ${to.y}, ${to.x} ${to.y}`;
-  return <path d={path} stroke={color} strokeWidth={draft ? 3 : 4} fill="none" opacity={draft ? 0.62 : 0.42} strokeLinecap="round" />;
+  return (
+    <g className={`edge-path ${draft ? "draft" : ""} ${selected ? "selected" : ""} ${active ? "active" : ""}`}>
+      <path className="edge-visible" d={path} stroke={color} strokeWidth={draft ? 3 : 4} fill="none" opacity={draft ? 0.62 : 0.42} strokeLinecap="round" />
+      {!draft && (
+        <path
+          className="edge-hitbox"
+          d={path}
+          fill="none"
+          stroke="transparent"
+          strokeWidth="18"
+          strokeLinecap="round"
+          onPointerDown={(event) => onSelect?.(event, edgeId)}
+        />
+      )}
+    </g>
+  );
 }
 
 function SelectionMarquee({ start, current }) {
@@ -1323,6 +1755,70 @@ function SelectionMarquee({ start, current }) {
       height={rect.bottom - rect.top}
       rx="8"
     />
+  );
+}
+
+function SelectionActionBar({ bounds, viewport, selectedCount, runnableCount, onRunAll, onGroup }) {
+  const x = viewport.x + (bounds.left + bounds.width / 2) * viewport.scale;
+  const y = viewport.y + bounds.top * viewport.scale - 54;
+
+  return (
+    <div className="selection-action-bar" style={{ left: x, top: y }} onPointerDown={(event) => event.stopPropagation()}>
+      <span className="selection-action-dot" aria-hidden="true" />
+      <span className="selection-action-divider" aria-hidden="true" />
+      <button onClick={onRunAll} disabled={!runnableCount} title={runnableCount ? `Run ${runnableCount} selected node${runnableCount === 1 ? "" : "s"}` : "No runnable selected nodes"}>
+        <Play size={18} />
+        <span>Run All</span>
+      </button>
+      <button onClick={onGroup} disabled={selectedCount < 2} title="Group selected nodes">
+        <Plus size={17} />
+        <span>Group</span>
+      </button>
+    </div>
+  );
+}
+
+function GroupBackdrop({ group, onDragStart, onResizeStart, onUpdate, onRemove }) {
+  const color = group.color || groupPalette[0];
+
+  return (
+    <section
+      className="node-group-backdrop"
+      style={{
+        transform: `translate(${group.x}px, ${group.y}px)`,
+        width: group.width,
+        height: group.height,
+        "--group-color": color
+      }}
+      onPointerDown={(event) => onDragStart(event, group)}
+    >
+      <div className="group-header">
+        <input
+          value={group.name || ""}
+          onChange={(event) => onUpdate(group.id, { name: event.target.value })}
+          onBlur={(event) => {
+            if (!event.target.value.trim()) onUpdate(group.id, { name: "Group" });
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          aria-label="Group name"
+        />
+        <div className="group-color-row" onPointerDown={(event) => event.stopPropagation()}>
+          {groupPalette.map((swatch) => (
+            <button
+              key={swatch}
+              className={`group-color-swatch ${swatch === color ? "active" : ""}`}
+              style={{ "--swatch-color": swatch }}
+              onClick={() => onUpdate(group.id, { color: swatch })}
+              title="Set group color"
+            />
+          ))}
+        </div>
+        <button className="group-remove" onClick={() => onRemove(group.id)} onPointerDown={(event) => event.stopPropagation()} title="Remove group">
+          <X size={13} />
+        </button>
+      </div>
+      <span className="group-resize-handle" onPointerDown={(event) => onResizeStart(event, group)} />
+    </section>
   );
 }
 
@@ -1804,8 +2300,9 @@ function NodeBody({
     const cameraPort = config.input.find((port) => port.id === "cameraIn");
     const stylePort = config.input.find((port) => port.id === "styleIn");
     const transferPort = config.input.find((port) => port.id === "transferIn");
+    const settingsOpen = Boolean(node.data.settingsOpen);
     return (
-      <div className="node-body model-node-body">
+      <div className="node-body model-node-body image-model-body">
         <ResultPane
           label="Results will appear here"
           resultUrl={node.data.resultUrl}
@@ -1816,36 +2313,51 @@ function NodeBody({
           error={node.data.error}
           onSelectResult={(index, item) => onUpdate(node.id, { selectedResultIndex: index, resultUrl: item.url })}
         />
+        <OutputPortRow node={node} port={outputPort} label="Image output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
+        {!settingsOpen && (
+          <div className="model-input-port-stack image-model-input-port-stack" aria-label="Image model inputs">
+            {[promptPort, imagePromptPort, cameraPort, stylePort, transferPort].filter(Boolean).map((port) => (
+              <PortHandle
+                key={port.id}
+                node={node}
+                port={port}
+                side="input"
+                onConnectStart={onConnectStart}
+                onDisconnectInput={onDisconnectInput}
+                connectedPortKeys={connectedPortKeys}
+              />
+            ))}
+          </div>
+        )}
         <button className="run-node-button" onClick={() => onRun(node)} disabled={running}>
           {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Image"}
         </button>
-        <OutputPortRow node={node} port={outputPort} label="Image output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
-        <NodeRow label="Model">
-          <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
-            <option>Nano Banana Pro</option>
-            <option>OpenAI Image 2</option>
-          </select>
-        </NodeRow>
-        <NodeRow label="Prompt" inputPort={promptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-          <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
-        </NodeRow>
-        {promptHasGeneratedAdditions && (
-          <div className="effective-prompt-preview">
-            <span>Camera/style/transfer instructions applied</span>
-          </div>
-        )}
-        <details open>
+        <details className="model-settings-drawer" open={settingsOpen} onToggle={(event) => onUpdate(node.id, { settingsOpen: event.currentTarget.open })}>
           <summary>Settings</summary>
-          <NodeRow label="Image Prompt" inputPort={imagePromptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+          <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+            <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
+          </NodeRow>
+          {promptHasGeneratedAdditions && (
+            <div className="effective-prompt-preview">
+              <span>Camera/style/transfer instructions applied</span>
+            </div>
+          )}
+          <NodeRow label="Model">
+            <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
+              <option>Nano Banana Pro</option>
+              <option>OpenAI Image 2</option>
+            </select>
+          </NodeRow>
+          <NodeRow label="Image Prompt" inputPort={settingsOpen ? imagePromptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={imagePromptLabel !== "Add file" ? "connected-field" : ""}>{imagePromptLabel}</button>
           </NodeRow>
-          <NodeRow label="Camera" inputPort={cameraPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+          <NodeRow label="Camera" inputPort={settingsOpen ? cameraPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={cameraPromptLabel !== "Add camera" ? "connected-field" : ""}>{cameraPromptLabel}</button>
           </NodeRow>
-          <NodeRow label="Style" inputPort={stylePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+          <NodeRow label="Style" inputPort={settingsOpen ? stylePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={stylePromptLabel !== "Add style" ? "connected-field" : ""}>{stylePromptLabel}</button>
           </NodeRow>
-          <NodeRow label="Transfer" inputPort={transferPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+          <NodeRow label="Transfer" inputPort={settingsOpen ? transferPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <button className={transferPromptLabel !== "Add transfer" ? "connected-field" : ""}>{transferPromptLabel}</button>
           </NodeRow>
           <NodeRow label="Generations">
@@ -1885,8 +2397,13 @@ function NodeBody({
   const referenceImagePort = config.input.find((port) => port.id === "referenceImageIn");
   const referenceVideoPort = config.input.find((port) => port.id === "referenceVideoIn");
   const referenceAudioPort = config.input.find((port) => port.id === "referenceAudioIn");
+  const isWanFunControl = isWanFunControlModel(node.data.model);
+  const settingsOpen = Boolean(node.data.settingsOpen);
+  const collapsedPorts = isWanFunControl
+    ? [promptPort, referenceVideoPort, referenceImagePort]
+    : [promptPort, startFramePort, endFramePort, referenceImagePort, referenceVideoPort, referenceAudioPort];
   return (
-    <div className="node-body model-node-body">
+    <div className="node-body model-node-body video-model-body">
       <ResultPane
         label="Results will appear here"
         resultUrl={node.data.resultUrl}
@@ -1901,31 +2418,32 @@ function NodeBody({
         {running ? `Running ${formatNodeBatchCount(node.data.batchCount)}...` : "Run Video"}
       </button>
       <OutputPortRow node={node} port={outputPort} label="Video output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
-      <NodeRow label="Model">
-        <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
-          <option>Seedance 2.0</option>
-          <option>Seedance 2.0 Fast</option>
-        </select>
-      </NodeRow>
-      <NodeRow label="Prompt" inputPort={promptPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-        <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
-      </NodeRow>
-      <details open>
+      {!settingsOpen && (
+        <div className="model-input-port-stack video-model-input-port-stack" aria-label="Video model inputs">
+          {collapsedPorts.filter(Boolean).map((port) => (
+            <PortHandle
+              key={port.id}
+              node={node}
+              port={port}
+              side="input"
+              onConnectStart={onConnectStart}
+              onDisconnectInput={onDisconnectInput}
+              connectedPortKeys={connectedPortKeys}
+            />
+          ))}
+        </div>
+      )}
+      <details className="model-settings-drawer" open={settingsOpen} onToggle={(event) => onUpdate(node.id, { settingsOpen: event.currentTarget.open })}>
         <summary>Settings</summary>
-        <NodeRow label="Start Frame" inputPort={startFramePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-          <button className={incoming.startFrameIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.startFrameIn, "Add file")}</button>
+        <NodeRow label="Model">
+          <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
+            <option>{videoModelNames.seedance}</option>
+            <option>{videoModelNames.seedanceFast}</option>
+            <option>{videoModelNames.wanFunControl}</option>
+          </select>
         </NodeRow>
-        <NodeRow label="End Frame" inputPort={endFramePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-          <button className={incoming.endFrameIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.endFrameIn, "Add file")}</button>
-        </NodeRow>
-        <NodeRow label="Reference Image" inputPort={referenceImagePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-          <button className={incoming.referenceImageIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceImageIn, "Add file")}</button>
-        </NodeRow>
-        <NodeRow label="Reference Video" inputPort={referenceVideoPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-          <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add file")}</button>
-        </NodeRow>
-        <NodeRow label="Reference Audio" inputPort={referenceAudioPort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-          <button className={incoming.referenceAudioIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceAudioIn, "Add file")}</button>
+        <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+          <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
         </NodeRow>
         <NodeRow label="Generations">
           <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
@@ -1936,33 +2454,104 @@ function NodeBody({
             ))}
           </select>
         </NodeRow>
-        <NodeRow label="Duration">
-          <select value={node.data.duration} onChange={(event) => onUpdate(node.id, { duration: event.target.value })}>
-            <option>15 seconds</option>
-            <option>10 seconds</option>
-            <option>5 seconds</option>
-          </select>
-        </NodeRow>
-        <NodeRow label="Resolution">
-          <select value={node.data.resolution} onChange={(event) => onUpdate(node.id, { resolution: event.target.value })}>
-            <option>720p</option>
-            <option>480p</option>
-            <option>1080p</option>
-          </select>
-        </NodeRow>
-        <NodeRow label="Aspect Ratio">
-          <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
-            <option>16:9 (Landscape)</option>
-            <option>21:9</option>
-            <option>9:16 (Portrait)</option>
-            <option>1:1</option>
-          </select>
-        </NodeRow>
-        <NodeRow label="Generate Audio">
-          <button className={`node-toggle ${node.data.generateAudio ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { generateAudio: !node.data.generateAudio })}>
-            <span />
-          </button>
-        </NodeRow>
+        {isWanFunControl ? (
+          <>
+            <NodeRow label="Control Video" inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add video")}</button>
+            </NodeRow>
+            <NodeRow label="Reference Image" inputPort={settingsOpen ? referenceImagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceImageIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceImageIn, "Optional image")}</button>
+            </NodeRow>
+            <NodeRow label="Preprocess">
+              <button className={`node-toggle ${node.data.preprocessVideo !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { preprocessVideo: node.data.preprocessVideo === false })}>
+                <span />
+              </button>
+            </NodeRow>
+            <NodeRow label="Type">
+              <select value={node.data.preprocessType || "depth"} onChange={(event) => onUpdate(node.id, { preprocessType: event.target.value })}>
+                <option value="depth">Depth</option>
+                <option value="pose">Pose</option>
+              </select>
+            </NodeRow>
+            <NodeRow label="Match Frames">
+              <button className={`node-toggle ${node.data.matchInputNumFrames !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { matchInputNumFrames: node.data.matchInputNumFrames === false })}>
+                <span />
+              </button>
+            </NodeRow>
+            {node.data.matchInputNumFrames === false && (
+              <NodeRow label="Frames">
+                <input type="number" min="1" max="241" value={node.data.numFrames || 81} onChange={(event) => onUpdate(node.id, { numFrames: event.target.value })} />
+              </NodeRow>
+            )}
+            <NodeRow label="Match FPS">
+              <button className={`node-toggle ${node.data.matchInputFps !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { matchInputFps: node.data.matchInputFps === false })}>
+                <span />
+              </button>
+            </NodeRow>
+            {node.data.matchInputFps === false && (
+              <NodeRow label="FPS">
+                <input type="number" min="1" max="60" value={node.data.fps || 16} onChange={(event) => onUpdate(node.id, { fps: event.target.value })} />
+              </NodeRow>
+            )}
+            <NodeRow label="Steps">
+              <input type="number" min="1" max="60" value={node.data.numInferenceSteps || 27} onChange={(event) => onUpdate(node.id, { numInferenceSteps: event.target.value })} />
+            </NodeRow>
+            <NodeRow label="Guidance">
+              <input type="number" min="0" max="20" step="0.1" value={node.data.guidanceScale || 6} onChange={(event) => onUpdate(node.id, { guidanceScale: event.target.value })} />
+            </NodeRow>
+            <NodeRow label="Shift">
+              <input type="number" min="0" max="20" step="0.1" value={node.data.shift || 5} onChange={(event) => onUpdate(node.id, { shift: event.target.value })} />
+            </NodeRow>
+            <NodeRow label="Seed">
+              <input value={node.data.seed || ""} onChange={(event) => onUpdate(node.id, { seed: event.target.value })} placeholder="Random" />
+            </NodeRow>
+          </>
+        ) : (
+          <>
+            <NodeRow label="Start Frame" inputPort={settingsOpen ? startFramePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.startFrameIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.startFrameIn, "Add file")}</button>
+            </NodeRow>
+            <NodeRow label="End Frame" inputPort={settingsOpen ? endFramePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.endFrameIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.endFrameIn, "Add file")}</button>
+            </NodeRow>
+            <NodeRow label="Reference Image" inputPort={settingsOpen ? referenceImagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceImageIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceImageIn, "Add file")}</button>
+            </NodeRow>
+            <NodeRow label="Reference Video" inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add file")}</button>
+            </NodeRow>
+            <NodeRow label="Reference Audio" inputPort={settingsOpen ? referenceAudioPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceAudioIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceAudioIn, "Add file")}</button>
+            </NodeRow>
+            <NodeRow label="Duration">
+              <select value={node.data.duration} onChange={(event) => onUpdate(node.id, { duration: event.target.value })}>
+                <option>15 seconds</option>
+                <option>10 seconds</option>
+                <option>5 seconds</option>
+              </select>
+            </NodeRow>
+            <NodeRow label="Resolution">
+              <select value={node.data.resolution} onChange={(event) => onUpdate(node.id, { resolution: event.target.value })}>
+                <option>720p</option>
+                <option>480p</option>
+                <option>1080p</option>
+              </select>
+            </NodeRow>
+            <NodeRow label="Aspect Ratio">
+              <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
+                <option>16:9 (Landscape)</option>
+                <option>21:9</option>
+                <option>9:16 (Portrait)</option>
+                <option>1:1</option>
+              </select>
+            </NodeRow>
+            <NodeRow label="Generate Audio">
+              <button className={`node-toggle ${node.data.generateAudio ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { generateAudio: !node.data.generateAudio })}>
+                <span />
+              </button>
+            </NodeRow>
+          </>
+        )}
       </details>
     </div>
   );
@@ -2148,6 +2737,10 @@ function createDefaultNodeData(type, label, count) {
   };
 }
 
+function isWanFunControlModel(model) {
+  return String(model || "").toLowerCase().includes("wan");
+}
+
 function configTitleFallback(type) {
   return nodeCatalog.find((item) => item.type === type)?.label || "Node";
 }
@@ -2190,6 +2783,11 @@ function buildConnectedPortKeys(edges) {
     keys.add(`${edge.to.nodeId}:${edge.to.port}`);
   });
   return keys;
+}
+
+function buildActiveEdgeIds(nodes, edges) {
+  const activeNodeIds = new Set(nodes.filter((node) => node.data?.status === "running").map((node) => node.id));
+  return new Set(edges.filter((edge) => activeNodeIds.has(edge.to.nodeId)).map((edge) => edge.id));
 }
 
 function connectedText(items = []) {
@@ -2298,6 +2896,18 @@ async function runVideoModelGeneration({ node, prompt, incoming, projectId, proj
       referenceImageUrls: connectedAssetUrls(incoming.referenceImageIn),
       referenceVideoUrls: connectedAssetUrls(incoming.referenceVideoIn),
       referenceAudioUrls: connectedAssetUrls(incoming.referenceAudioIn),
+      wanFunControl: {
+        preprocessVideo: node.data.preprocessVideo !== false,
+        preprocessType: node.data.preprocessType || "depth",
+        matchInputNumFrames: node.data.matchInputNumFrames !== false,
+        numFrames: node.data.numFrames || 81,
+        matchInputFps: node.data.matchInputFps !== false,
+        fps: node.data.fps || 16,
+        numInferenceSteps: node.data.numInferenceSteps || 27,
+        guidanceScale: node.data.guidanceScale || 6,
+        shift: node.data.shift || 5,
+        seed: node.data.seed || ""
+      },
       projectId,
       projectName,
       nodeId: node.id,
@@ -2516,12 +3126,91 @@ function rectsIntersect(first, second) {
   return first.left <= second.right && first.right >= second.left && first.top <= second.bottom && first.bottom >= second.top;
 }
 
+function pointInRect(rect, point) {
+  return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+}
+
+function groupToRect(group) {
+  return {
+    left: group.x,
+    top: group.y,
+    right: group.x + group.width,
+    bottom: group.y + group.height
+  };
+}
+
+function sameStringList(first = [], second = []) {
+  if (first.length !== second.length) return false;
+  return first.every((value, index) => value === second[index]);
+}
+
+function finiteNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function isRunnableNode(node) {
+  return ["text", "imageModel", "videoModel"].includes(node.type);
+}
+
+function buildSelectedRunnableDependencies(nodes, edges) {
+  const runnableIds = new Set(nodes.map((node) => node.id));
+  const dependencies = new Map(nodes.map((node) => [node.id, []]));
+
+  edges.forEach((edge) => {
+    if (!runnableIds.has(edge.from.nodeId) || !runnableIds.has(edge.to.nodeId)) return;
+    dependencies.get(edge.to.nodeId)?.push(edge.from.nodeId);
+  });
+
+  return dependencies;
+}
+
+function nodeRunPriority(node) {
+  if (node?.type === "text") return 0;
+  if (node?.type === "imageModel") return 1;
+  if (node?.type === "videoModel") return 2;
+  return 3;
+}
+
+function runStageLabel(type) {
+  if (type === "text") return "text";
+  if (type === "imageModel") return "image";
+  if (type === "videoModel") return "video";
+  return "selected";
+}
+
+function nodeTitle(node) {
+  return node?.data?.title || node?.type || "a dependency";
+}
+
+async function settleSequential(items, run, delayMs = 0) {
+  const results = [];
+
+  for (const [index, item] of items.entries()) {
+    if (index > 0 && delayMs > 0) await wait(delayMs);
+
+    try {
+      results.push({ status: "fulfilled", value: await run(item, index) });
+    } catch (reason) {
+      results.push({ status: "rejected", reason });
+    }
+  }
+
+  return results;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function cloneGraphState(state) {
   return {
     nodes: state.nodes.map(cloneNode),
     edges: state.edges.map(cloneEdge),
+    groups: (state.groups || []).map(cloneGroup),
     viewport: { ...state.viewport },
-    selectedNodeIds: [...state.selectedNodeIds]
+    selectedNodeIds: [...state.selectedNodeIds],
+    selectedEdgeId: state.selectedEdgeId || null
   };
 }
 
@@ -2540,11 +3229,19 @@ function cloneEdge(edge) {
   };
 }
 
+function cloneGroup(group) {
+  return {
+    ...group,
+    nodeIds: [...(group.nodeIds || [])]
+  };
+}
+
 function loadNodeEditorDraft() {
   const fallbackGraph = normalizeEditorGraph(initialNodes, initialEdges);
   const fallback = {
     nodes: fallbackGraph.nodes,
     edges: fallbackGraph.edges,
+    groups: fallbackGraph.groups,
     viewport: { x: 0, y: 0, scale: 1 },
     projectId: null,
     projectName: "Untitled node project",
@@ -2554,10 +3251,11 @@ function loadNodeEditorDraft() {
   try {
     const parsed = JSON.parse(localStorage.getItem(nodeDraftStorageKey) || "null");
     if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return fallback;
-    const graph = normalizeEditorGraph(parsed.nodes, parsed.edges);
+    const graph = normalizeEditorGraph(parsed.nodes, parsed.edges, parsed.groups);
     return {
       nodes: graph.nodes,
       edges: graph.edges,
+      groups: graph.groups,
       viewport: parsed.viewport || fallback.viewport,
       projectId: parsed.projectId || null,
       projectName: parsed.projectName || fallback.projectName,
@@ -2568,7 +3266,7 @@ function loadNodeEditorDraft() {
   }
 }
 
-function normalizeEditorGraph(nodes = [], edges = []) {
+function normalizeEditorGraph(nodes = [], edges = [], groups = []) {
   const normalizedNodes = [];
   const legacySplits = new Map();
 
@@ -2601,8 +3299,29 @@ function normalizeEditorGraph(nodes = [], edges = []) {
 
   return {
     nodes: normalizedNodes,
-    edges: dedupeEdges(normalizedEdges)
+    edges: dedupeEdges(normalizedEdges),
+    groups: normalizeGroups(groups, nodeMap)
   };
+}
+
+function normalizeGroups(groups = [], nodeMap = new Map()) {
+  if (!Array.isArray(groups)) return [];
+
+  return groups
+    .map((group, index) => {
+      const nodeIds = [...new Set(Array.isArray(group?.nodeIds) ? group.nodeIds.filter((id) => nodeMap.has(id)) : [])];
+      return {
+        id: String(group?.id || `group-${index + 1}`),
+        name: String(group?.name || `Group ${index + 1}`),
+        color: groupPalette.includes(group?.color) ? group.color : groupPalette[index % groupPalette.length],
+        x: finiteNumber(group?.x, 120 + index * 30),
+        y: finiteNumber(group?.y, 120 + index * 30),
+        width: Math.max(groupMinWidth, finiteNumber(group?.width, groupMinWidth)),
+        height: Math.max(groupMinHeight, finiteNumber(group?.height, groupMinHeight)),
+        nodeIds
+      };
+    })
+    .filter((group) => group.id && group.width && group.height);
 }
 
 function isLegacyDirectionNode(node) {

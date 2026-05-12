@@ -158,6 +158,7 @@ app.post("/api/saved-workflows", async (req, res) => {
     graph: {
       nodes: Array.isArray(req.body.nodes) ? req.body.nodes : [],
       edges: Array.isArray(req.body.edges) ? req.body.edges : [],
+      groups: Array.isArray(req.body.groups) ? req.body.groups : [],
       viewport: req.body.viewport || { x: 0, y: 0, scale: 1 }
     }
   };
@@ -205,6 +206,7 @@ app.post("/api/node-projects", async (req, res) => {
     graph: {
       nodes: Array.isArray(req.body.nodes) ? req.body.nodes : [],
       edges: Array.isArray(req.body.edges) ? req.body.edges : [],
+      groups: Array.isArray(req.body.groups) ? req.body.groups : [],
       viewport: req.body.viewport || { x: 0, y: 0, scale: 1 }
     }
   };
@@ -435,38 +437,11 @@ app.post("/api/node/generate-image", async (req, res) => {
       });
     }
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": process.env.GOOGLE_API_KEY
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts
-          }
-        ],
-        generationConfig: {
-          responseModalities: ["TEXT", "IMAGE"],
-          imageConfig
-        }
-      })
+    const { text, inlineData, attempts } = await generateGeminiImageWithRetries({
+      model,
+      parts,
+      imageConfig
     });
-
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data?.error?.message || "Image generation failed.", raw: data });
-    }
-
-    const responseParts = data?.candidates?.[0]?.content?.parts || [];
-    const text = responseParts.find((part) => part.text)?.text || "";
-    const imagePart = responseParts.find((part) => part.inlineData?.data || part.inline_data?.data);
-    const inlineData = imagePart?.inlineData || imagePart?.inline_data;
-
-    if (!inlineData?.data) {
-      return res.status(502).json({ error: "Gemini returned no image data.", text, raw: data });
-    }
 
     const mimeType = inlineData.mimeType || inlineData.mime_type || "image/png";
     const extension = extensionForMime(mimeType);
@@ -492,6 +467,7 @@ app.post("/api/node/generate-image", async (req, res) => {
         aspectRatio: req.body.aspectRatio || "21:9",
         resolution: req.body.resolution || "2K",
         imageConfig,
+        attempts,
         imagePromptCount: imagePromptUrls.length
       },
       cost,
@@ -511,6 +487,10 @@ app.post("/api/node/generate-image", async (req, res) => {
       }
     });
   } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message || "Image generation failed.", text: error.text || "", raw: error.raw });
+    }
+
     console.error(error);
     res.status(500).json({ error: error.message || "Image generation failed." });
   }
@@ -527,7 +507,17 @@ app.post("/api/node/generate-video", async (req, res) => {
       return res.status(400).json({ error: "Prompt is required." });
     }
 
-    const speed = String(req.body.model || "").toLowerCase().includes("fast") ? "fast" : "standard";
+    const selectedVideoModel = resolveVideoModel(req.body.model);
+
+    if (selectedVideoModel.provider === "fal-wan-fun-control") {
+      return runWanFunControlVideo(req, res, {
+        prompt,
+        referenceImageUrls: Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [],
+        referenceVideoUrls: Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : []
+      });
+    }
+
+    const speed = selectedVideoModel.speed;
     const speedPrefix = speed === "fast" ? "fast/" : "";
     const startFrameUrl = firstLocalOutput(req.body.startFrameUrls);
     const endFrameUrl = firstLocalOutput(req.body.endFrameUrls);
@@ -629,6 +619,97 @@ app.post("/api/node/generate-video", async (req, res) => {
     res.status(500).json({ error: error.message || "Video generation failed." });
   }
 });
+
+async function runWanFunControlVideo(req, res, { prompt, referenceImageUrls, referenceVideoUrls }) {
+  const controlVideoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!controlVideoUrl) {
+    return res.status(400).json({ error: "Wan Fun Control requires a connected control video." });
+  }
+
+  const options = req.body.wanFunControl || {};
+  const endpoint = "fal-ai/wan-fun-control";
+  const matchInputNumFrames = options.matchInputNumFrames !== false;
+  const matchInputFps = options.matchInputFps !== false;
+  const preprocessVideo = options.preprocessVideo !== false;
+  const input = {
+    prompt,
+    control_video_url: await uploadLocalOutputToFal(controlVideoUrl),
+    preprocess_video: preprocessVideo,
+    preprocess_type: normalizeChoice(options.preprocessType, ["depth", "pose"], "depth"),
+    match_input_num_frames: matchInputNumFrames,
+    match_input_fps: matchInputFps,
+    num_inference_steps: clampInteger(options.numInferenceSteps, 1, 60, 27),
+    guidance_scale: clampNumber(options.guidanceScale, 0, 20, 6),
+    shift: clampNumber(options.shift, 0, 20, 5)
+  };
+  const seed = optionalInteger(options.seed);
+  const referenceImageUrl = firstLocalOutput(referenceImageUrls);
+
+  if (!matchInputNumFrames) input.num_frames = clampInteger(options.numFrames, 1, 241, 81);
+  if (!matchInputFps) input.fps = clampInteger(options.fps, 1, 60, 16);
+  if (seed !== undefined) input.seed = seed;
+  if (referenceImageUrl) input.reference_image_url = await uploadLocalOutputToFal(referenceImageUrl);
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = result?.data?.video;
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "wan-fun-control");
+  const cost = estimateWanFunControlCost({
+    endpoint,
+    matchInputNumFrames,
+    numFrames: input.num_frames,
+    matchInputFps,
+    fps: input.fps
+  });
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: "Wan Fun Control",
+    endpoint,
+    mode: "Wan Fun Control video to video",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      preprocessVideo,
+      preprocessType: input.preprocess_type,
+      matchInputNumFrames,
+      numFrames: input.num_frames || null,
+      matchInputFps,
+      fps: input.fps || null,
+      numInferenceSteps: input.num_inference_steps,
+      guidanceScale: input.guidance_scale,
+      shift: input.shift,
+      controlVideoCount: 1,
+      referenceImageCount: referenceImageUrl ? 1 : 0,
+      seed: result?.data?.seed ?? input.seed ?? null
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    seed: result?.data?.seed ?? input.seed,
+    endpoint,
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
 
 app.post(
   "/api/generate",
@@ -900,6 +981,7 @@ async function readSavedWorkflows() {
         graph: {
           nodes: Array.isArray(workflow.graph?.nodes) ? workflow.graph.nodes : [],
           edges: Array.isArray(workflow.graph?.edges) ? workflow.graph.edges : [],
+          groups: Array.isArray(workflow.graph?.groups) ? workflow.graph.groups : [],
           viewport: workflow.graph?.viewport || { x: 0, y: 0, scale: 1 }
         }
       });
@@ -998,6 +1080,29 @@ function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind
     pricingBasis: "Seedance 2.0 per-second fal.ai pricing estimate",
     pricingSource: "configured-pricing-v1",
     routeKind
+  };
+}
+
+function estimateWanFunControlCost({ endpoint, matchInputNumFrames, numFrames, matchInputFps, fps }) {
+  const billingFrames = matchInputNumFrames ? 81 : numFrames;
+  const seconds = billingFrames / 16;
+  const unitRateUsd = 0.1;
+
+  return {
+    amountUsd: roundCurrency(seconds * unitRateUsd),
+    currency: "USD",
+    unitRateUsd,
+    units: seconds,
+    unit: "video second",
+    mediaType: "video",
+    pricingBasis: "fal.ai Wan Fun Control per-video-second pricing estimate at 16 fps",
+    pricingSource: "fal-model-page-2026-05-11",
+    endpoint,
+    matchInputNumFrames,
+    billingFrames,
+    numFrames: numFrames || null,
+    matchInputFps,
+    fps: fps || null
   };
 }
 
@@ -1318,6 +1423,26 @@ function resolveImageModel(model) {
   };
 }
 
+function resolveVideoModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("wan")) {
+    return {
+      provider: "fal-wan-fun-control",
+      displayName: "Wan Fun Control",
+      id: "fal-ai/wan-fun-control",
+      speed: "wan"
+    };
+  }
+
+  const speed = normalized.includes("fast") ? "fast" : "standard";
+  return {
+    provider: "fal-seedance",
+    displayName: speed === "fast" ? "Seedance 2.0 Fast" : "Seedance 2.0",
+    id: `bytedance/seedance-2.0/${speed === "fast" ? "fast/" : ""}`,
+    speed
+  };
+}
+
 function normalizeGeminiImageAspectRatio(value) {
   const normalized = String(value || "21:9").match(/\d+:\d+/)?.[0] || "21:9";
   return normalizeChoice(normalized, ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], "21:9");
@@ -1326,6 +1451,87 @@ function normalizeGeminiImageAspectRatio(value) {
 function normalizeGeminiImageSize(value) {
   const normalized = String(value || "2K").toUpperCase();
   return normalizeChoice(normalized, ["1K", "2K", "4K"], "2K");
+}
+
+async function generateGeminiImageWithRetries({ model, parts, imageConfig }) {
+  const maxAttempts = 3;
+  let lastText = "";
+  let lastRaw = null;
+  let lastFinishReason = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": process.env.GOOGLE_API_KEY
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts
+          }
+        ],
+        generationConfig: {
+          responseModalities: ["TEXT", "IMAGE"],
+          imageConfig
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw httpError(response.status, data?.error?.message || "Image generation failed.", { raw: data });
+    }
+
+    const parsed = extractGeminiImageData(data);
+    if (parsed.inlineData?.data) {
+      return {
+        ...parsed,
+        attempts: attempt
+      };
+    }
+
+    lastText = parsed.text;
+    lastRaw = data;
+    lastFinishReason = parsed.finishReason;
+
+    if (attempt < maxAttempts) {
+      await delay(900 * attempt);
+    }
+  }
+
+  const finishReason = lastFinishReason ? ` Finish reason: ${lastFinishReason}.` : "";
+  throw httpError(502, `Gemini returned no image data after ${maxAttempts} attempts.${finishReason}`, {
+    text: lastText,
+    raw: lastRaw
+  });
+}
+
+function extractGeminiImageData(data) {
+  const candidate = data?.candidates?.[0] || {};
+  const responseParts = candidate?.content?.parts || [];
+  const text = responseParts.find((part) => part.text)?.text || "";
+  const imagePart = responseParts.find((part) => part.inlineData?.data || part.inline_data?.data);
+  const inlineData = imagePart?.inlineData || imagePart?.inline_data;
+
+  return {
+    text,
+    inlineData,
+    finishReason: candidate.finishReason || candidate.finish_reason || "",
+    raw: data
+  };
+}
+
+function httpError(status, message, extra = {}) {
+  return Object.assign(new Error(message), {
+    status,
+    ...extra
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function generateOpenAiImage({ prompt, imagePromptUrls, imagePromptLabels, aspectRatio, resolution }) {
@@ -1470,6 +1676,24 @@ function normalizeDuration(value) {
 function normalizeAspectRatio(value) {
   const normalized = String(value || "16:9").match(/\d+:\d+/)?.[0] || "16:9";
   return normalizeChoice(normalized, ["auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"], "16:9");
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function optionalInteger(value) {
+  if (value === "" || value === null || value === undefined) return undefined;
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function firstLocalOutput(value) {
