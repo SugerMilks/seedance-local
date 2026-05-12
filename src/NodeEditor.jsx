@@ -1,4 +1,5 @@
 import React from "react";
+import * as THREE from "three";
 import {
   Camera,
   ChevronDown,
@@ -109,6 +110,15 @@ const typePresetPrompts = {
 const shotPresetNames = Object.keys(shotPresetPrompts);
 const lensPresetNames = Object.keys(lensPresetPrompts);
 const typePresetNames = Object.keys(typePresetPrompts);
+const qwenCameraDefaults = {
+  horizontalAngle: 90,
+  verticalAngle: 0,
+  zoom: 5,
+  additionalPrompt: "",
+  loraScale: 1,
+  guidanceScale: 4.5,
+  numInferenceSteps: 28
+};
 
 const initialNodes = [
   {
@@ -231,6 +241,15 @@ export default function NodeEditor() {
   React.useEffect(() => {
     edgesRef.current = edges;
   }, [edges]);
+
+  React.useEffect(() => {
+    setEdges((current) => {
+      const normalizedEdges = normalizeEdgesForCurrentGraph(current, nodesRef.current);
+      if (sameEdgeList(current, normalizedEdges)) return current;
+      edgesRef.current = normalizedEdges;
+      return normalizedEdges;
+    });
+  }, [edges, nodes]);
 
   React.useLayoutEffect(() => {
     updatePortPositions();
@@ -1135,9 +1154,23 @@ export default function NodeEditor() {
     if (!source || !target) return "Choose a valid connection";
 
     if (source.type === "camera") {
+      if (from.port === "imageOut") {
+        if (target.type === "preview" && to.port === "sourceIn") return "";
+        if (target.type === "text" && to.port === "imageIn") return "";
+        if (target.type === "camera" && to.port === "imageIn") return "";
+        if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
+        if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
+        return "Camera image output connects to image inputs";
+      }
+
       if (!hasCameraPreset(source)) return "Choose a Camera preset before connecting";
       if (target.type === "imageModel" && to.port === "cameraIn") return "";
       return "Camera connects to the Image Model camera input";
+    }
+
+    if (target.type === "camera" && to.port === "imageIn") {
+      if (["image", "imageModel", "transfer"].includes(source.type)) return "";
+      return "Camera image input accepts image outputs";
     }
 
     if (source?.type === "style") {
@@ -1408,6 +1441,20 @@ export default function NodeEditor() {
           ? { status: "running", error: "" }
           : { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 };
       updateNode(currentNode.id, runningPatch);
+
+      if (currentNode.type === "camera") {
+        const generated = await runCameraQwenEdit({ node: currentNode, incoming, projectId, projectName });
+        updateNode(currentNode.id, {
+          status: "complete",
+          resultUrl: generated.url,
+          resultItems: [generated],
+          selectedResultIndex: 0,
+          resultText: generated.prompt || "",
+          seed: generated.seed,
+          error: ""
+        });
+        return { status: "complete" };
+      }
 
       if (currentNode.type === "text") {
         const processed = await runTextNodeProcessing({ node: currentNode, incoming, projectId, projectName });
@@ -2064,6 +2111,204 @@ function StyleCollage({ images, locked, onRemove, onDropImages }) {
   );
 }
 
+function CameraControlViewport({ imageUrl, horizontalAngle, verticalAngle, zoom, onChange }) {
+  const mountRef = React.useRef(null);
+  const planeMaterialRef = React.useRef(null);
+  const cameraMarkerRef = React.useRef(null);
+  const previewStateRef = React.useRef({ horizontalAngle, verticalAngle, zoom });
+  const onChangeRef = React.useRef(onChange);
+
+  React.useEffect(() => {
+    previewStateRef.current = { horizontalAngle, verticalAngle, zoom };
+    onChangeRef.current = onChange;
+  }, [horizontalAngle, verticalAngle, zoom, onChange]);
+
+  React.useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return undefined;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x161616);
+
+    const previewCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+    previewCamera.position.set(2.8, 2.1, 3.1);
+    previewCamera.lookAt(0, 0.35, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.domElement.className = "camera-viewport-canvas";
+    mount.appendChild(renderer.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.8);
+    scene.add(ambientLight);
+
+    const grid = new THREE.GridHelper(4.2, 16, 0x2c2c2c, 0x252525);
+    grid.position.y = -0.72;
+    scene.add(grid);
+
+    const planeGeometry = new THREE.PlaneGeometry(1.25, 1.25);
+    const planeMaterial = new THREE.MeshBasicMaterial({ color: 0x77807a, side: THREE.DoubleSide });
+    planeMaterialRef.current = planeMaterial;
+    const plane = new THREE.Mesh(planeGeometry, planeMaterial);
+    plane.position.y = 0.1;
+    scene.add(plane);
+
+    const horizontalRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.38, 0.018, 12, 96),
+      new THREE.MeshBasicMaterial({ color: 0x20f3a6 })
+    );
+    horizontalRing.rotation.x = Math.PI / 2;
+    horizontalRing.position.y = -0.66;
+    scene.add(horizontalRing);
+
+    const elevationRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.2, 0.016, 12, 96),
+      new THREE.MeshBasicMaterial({ color: 0xff69cc })
+    );
+    elevationRing.rotation.y = Math.PI / 2;
+    elevationRing.position.x = -0.28;
+    elevationRing.position.y = 0.06;
+    scene.add(elevationRing);
+
+    const cameraMarker = new THREE.Group();
+    const lens = new THREE.Mesh(new THREE.SphereGeometry(0.1, 24, 16), new THREE.MeshBasicMaterial({ color: 0xf9d624 }));
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.18, 0.2), new THREE.MeshBasicMaterial({ color: 0x34516b }));
+    body.position.z = 0.2;
+    cameraMarker.add(lens, body);
+    scene.add(cameraMarker);
+    cameraMarkerRef.current = cameraMarker;
+
+    let frameId = 0;
+    let dragging = false;
+    let lastPointer = { x: 0, y: 0 };
+
+    function resize() {
+      const rect = mount.getBoundingClientRect();
+      const width = Math.max(260, rect.width);
+      const height = Math.max(220, rect.height);
+      renderer.setSize(width, height, false);
+      previewCamera.aspect = width / height;
+      previewCamera.updateProjectionMatrix();
+    }
+
+    function updateCameraMarker() {
+      const state = previewStateRef.current;
+      const azimuth = THREE.MathUtils.degToRad(state.horizontalAngle);
+      const elevation = THREE.MathUtils.degToRad(state.verticalAngle);
+      const distance = THREE.MathUtils.lerp(2.25, 1.05, clamp(state.zoom, 0, 10) / 10);
+      const groundRadius = distance * Math.cos(elevation);
+
+      cameraMarker.position.set(Math.sin(azimuth) * groundRadius, -0.24 + Math.sin(elevation) * 1.35, Math.cos(azimuth) * groundRadius);
+      cameraMarker.lookAt(0, 0.1, 0);
+    }
+
+    function render() {
+      updateCameraMarker();
+      renderer.render(scene, previewCamera);
+      frameId = window.requestAnimationFrame(render);
+    }
+
+    function handlePointerDown(event) {
+      dragging = true;
+      lastPointer = { x: event.clientX, y: event.clientY };
+      renderer.domElement.setPointerCapture?.(event.pointerId);
+    }
+
+    function handlePointerMove(event) {
+      if (!dragging) return;
+      const dx = event.clientX - lastPointer.x;
+      const dy = event.clientY - lastPointer.y;
+      lastPointer = { x: event.clientX, y: event.clientY };
+      const state = previewStateRef.current;
+      onChangeRef.current?.({
+        horizontalAngle: positiveModulo(state.horizontalAngle + dx * 0.7, 360),
+        verticalAngle: clamp(state.verticalAngle - dy * 0.45, -30, 90)
+      });
+    }
+
+    function handlePointerUp(event) {
+      dragging = false;
+      renderer.domElement.releasePointerCapture?.(event.pointerId);
+    }
+
+    function handleWheel(event) {
+      event.preventDefault();
+      const state = previewStateRef.current;
+      onChangeRef.current?.({ zoom: clamp(state.zoom - event.deltaY * 0.012, 0, 10) });
+    }
+
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(mount);
+    resize();
+    renderer.domElement.addEventListener("pointerdown", handlePointerDown);
+    renderer.domElement.addEventListener("pointermove", handlePointerMove);
+    renderer.domElement.addEventListener("pointerup", handlePointerUp);
+    renderer.domElement.addEventListener("pointercancel", handlePointerUp);
+    renderer.domElement.addEventListener("wheel", handleWheel, { passive: false });
+    render();
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      resizeObserver.disconnect();
+      renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
+      renderer.domElement.removeEventListener("pointermove", handlePointerMove);
+      renderer.domElement.removeEventListener("pointerup", handlePointerUp);
+      renderer.domElement.removeEventListener("pointercancel", handlePointerUp);
+      renderer.domElement.removeEventListener("wheel", handleWheel);
+      planeMaterial.map?.dispose();
+      planeGeometry.dispose();
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const material = planeMaterialRef.current;
+    if (!material) return undefined;
+
+    let cancelled = false;
+    const previousMap = material.map;
+
+    if (!imageUrl) {
+      material.map = null;
+      material.color.set(0x77807a);
+      material.needsUpdate = true;
+      previousMap?.dispose();
+      return undefined;
+    }
+
+    const loader = new THREE.TextureLoader();
+    loader.load(imageUrl, (texture) => {
+      if (cancelled) {
+        texture.dispose();
+        return;
+      }
+
+      texture.colorSpace = THREE.SRGBColorSpace;
+      material.map = texture;
+      material.color.set(0xffffff);
+      material.needsUpdate = true;
+      previousMap?.dispose();
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [imageUrl]);
+
+  return (
+    <div className="camera-viewport-shell" onPointerDown={(event) => event.stopPropagation()}>
+      <div ref={mountRef} className="camera-viewport" />
+      <div className="camera-viewport-legend">
+        <span className="azimuth-dot">Azimuth</span>
+        <span className="elevation-dot">Elevation</span>
+        <span className="zoom-dot">Zoom</span>
+      </div>
+      {!imageUrl && <span className="camera-viewport-empty">Connect an image</span>}
+    </div>
+  );
+}
+
 function UploadIcon({ type }) {
   if (type === "image") return <FileImage size={22} />;
   if (type === "video") return <Video size={22} />;
@@ -2172,38 +2417,121 @@ function NodeBody({
 
   if (node.type === "camera") {
     const cameraSelected = hasCameraPreset(node);
+    const cameraOutputPort = config.output.find((port) => port.id === "cameraOut");
+    const imageOutputPort = config.output.find((port) => port.id === "imageOut");
+    const imageInputPort = config.input.find((port) => port.id === "imageIn");
+    const imageInputUrl = connectedAssetUrls(incoming.imageIn).at(-1) || "";
+    const imageInputLabel = connectedSummary(incoming.imageIn, "Add image");
+    const cameraPresetDisabled = Boolean(imageInputUrl);
+    const qwenOpen = Boolean(node.data.qwenCameraOpen);
+    const horizontalAngle = finiteNumber(node.data.horizontalAngle, qwenCameraDefaults.horizontalAngle);
+    const verticalAngle = finiteNumber(node.data.verticalAngle, qwenCameraDefaults.verticalAngle);
+    const zoom = finiteNumber(node.data.zoom, qwenCameraDefaults.zoom);
     return (
-      <div className="node-body style-only-node-body">
+      <div className="node-body style-only-node-body camera-node-body">
         {cameraSelected ? (
-          <OutputPortRow node={node} port={outputPort} label={cameraLabel(node)} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
+          <OutputPortRow node={node} port={cameraOutputPort} label={cameraLabel(node)} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         ) : (
           <div className="style-output-placeholder">Choose camera preset to enable output</div>
         )}
+        <OutputPortRow node={node} port={imageOutputPort} label="Camera image" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
+        {!qwenOpen && imageInputPort && (
+          <div className="model-input-port-stack camera-input-port-stack" aria-label="Camera edit inputs">
+            <PortHandle
+              node={node}
+              port={imageInputPort}
+              side="input"
+              onConnectStart={onConnectStart}
+              onDisconnectInput={onDisconnectInput}
+              connectedPortKeys={connectedPortKeys}
+            />
+          </div>
+        )}
 
-        <div className="style-preset-row">
+        <div className={`style-preset-row ${cameraPresetDisabled ? "disabled" : ""}`}>
           <span>Shot</span>
-          <select value={node.data.shotPreset || "None"} onChange={(event) => onUpdate(node.id, { shotPreset: event.target.value })}>
+          <select value={node.data.shotPreset || "None"} disabled={cameraPresetDisabled} onChange={(event) => onUpdate(node.id, { shotPreset: event.target.value })}>
             {shotPresetNames.map((presetName) => (
               <option key={presetName}>{presetName}</option>
             ))}
           </select>
         </div>
-        <div className="style-preset-row">
+        <div className={`style-preset-row ${cameraPresetDisabled ? "disabled" : ""}`}>
           <span>Lens</span>
-          <select value={node.data.lensPreset || "None"} onChange={(event) => onUpdate(node.id, { lensPreset: event.target.value })}>
+          <select value={node.data.lensPreset || "None"} disabled={cameraPresetDisabled} onChange={(event) => onUpdate(node.id, { lensPreset: event.target.value })}>
             {lensPresetNames.map((presetName) => (
               <option key={presetName}>{presetName}</option>
             ))}
           </select>
         </div>
-        <div className="style-preset-row">
+        <div className={`style-preset-row ${cameraPresetDisabled ? "disabled" : ""}`}>
           <span>Type</span>
-          <select value={node.data.typePreset || "None"} onChange={(event) => onUpdate(node.id, { typePreset: event.target.value })}>
+          <select value={node.data.typePreset || "None"} disabled={cameraPresetDisabled} onChange={(event) => onUpdate(node.id, { typePreset: event.target.value })}>
             {typePresetNames.map((presetName) => (
               <option key={presetName}>{presetName}</option>
             ))}
           </select>
         </div>
+        <details className="model-settings-drawer camera-control-drawer" open={qwenOpen} onToggle={(event) => onUpdate(node.id, { qwenCameraOpen: event.currentTarget.open })}>
+          <summary>Qwen Camera Edit</summary>
+          <NodeRow label="Image" inputPort={qwenOpen ? imageInputPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+            <button className={imageInputUrl ? "connected-field" : ""}>{imageInputLabel}</button>
+          </NodeRow>
+          <CameraControlViewport
+            imageUrl={imageInputUrl}
+            horizontalAngle={horizontalAngle}
+            verticalAngle={verticalAngle}
+            zoom={zoom}
+            onChange={(patch) => onUpdate(node.id, patch)}
+          />
+          <div className="camera-control-grid">
+            <div className="camera-control-toolbar">
+              <button
+                className="camera-reset-button"
+                onClick={() =>
+                  onUpdate(node.id, {
+                    horizontalAngle: qwenCameraDefaults.horizontalAngle,
+                    verticalAngle: qwenCameraDefaults.verticalAngle,
+                    zoom: qwenCameraDefaults.zoom
+                  })
+                }
+              >
+                Reset
+              </button>
+            </div>
+            <label>
+              <span>Azimuth</span>
+              <input type="range" min="0" max="360" step="1" value={horizontalAngle} onChange={(event) => onUpdate(node.id, { horizontalAngle: Number(event.target.value) })} />
+              <strong>{Math.round(horizontalAngle)} deg</strong>
+            </label>
+            <label>
+              <span>Elevation</span>
+              <input type="range" min="-30" max="90" step="1" value={verticalAngle} onChange={(event) => onUpdate(node.id, { verticalAngle: Number(event.target.value) })} />
+              <strong>{Math.round(verticalAngle)} deg</strong>
+            </label>
+            <label>
+              <span>Zoom</span>
+              <input type="range" min="0" max="10" step="0.1" value={zoom} onChange={(event) => onUpdate(node.id, { zoom: Number(event.target.value) })} />
+              <strong>{zoom.toFixed(1)}</strong>
+            </label>
+          </div>
+          <NodeRow label="Prompt">
+            <textarea
+              value={node.data.additionalPrompt || ""}
+              onChange={(event) => onUpdate(node.id, { additionalPrompt: event.target.value })}
+              placeholder="Optional extra instruction"
+            />
+          </NodeRow>
+          {node.data.resultUrl && (
+            <div className="camera-generated-preview">
+              <img src={node.data.resultUrl} alt="Qwen camera edit result" />
+            </div>
+          )}
+          {node.data.error && <small className="upload-error">{node.data.error}</small>}
+          <button className="run-node-button" onClick={() => onRun(node)} disabled={running || !imageInputUrl}>
+            {running ? "Running Camera..." : "Run Camera Edit"}
+          </button>
+        </details>
       </div>
     );
   }
@@ -2694,8 +3022,11 @@ function getNodeConfig(type) {
     },
     camera: {
       icon: Camera,
-      input: [],
-      output: [{ id: "cameraOut", label: "Camera", color: portColors.camera }]
+      input: [{ id: "imageIn", label: "Image", color: portColors.image }],
+      output: [
+        { id: "cameraOut", label: "Camera", color: portColors.camera },
+        { id: "imageOut", label: "Image", color: portColors.image }
+      ]
     },
     style: {
       icon: Palette,
@@ -2761,7 +3092,9 @@ function createDefaultNodeData(type, label, count) {
       title,
       shotPreset: "None",
       lensPreset: "None",
-      typePreset: "None"
+      typePreset: "None",
+      qwenCameraOpen: false,
+      ...qwenCameraDefaults
     };
   }
   if (type === "transfer") {
@@ -2949,6 +3282,41 @@ async function runTextNodeProcessing({ node, incoming, projectId, projectName })
   };
 }
 
+async function runCameraQwenEdit({ node, incoming, projectId, projectName }) {
+  const imageUrl = connectedAssetUrls(incoming.imageIn).at(-1);
+  if (!imageUrl) throw new Error("Connect an image to the Camera node.");
+
+  const response = await fetch("/api/node/qwen-camera-edit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imageUrls: [imageUrl],
+      horizontalAngle: finiteNumber(node.data.horizontalAngle, qwenCameraDefaults.horizontalAngle),
+      verticalAngle: finiteNumber(node.data.verticalAngle, qwenCameraDefaults.verticalAngle),
+      zoom: finiteNumber(node.data.zoom, qwenCameraDefaults.zoom),
+      additionalPrompt: node.data.additionalPrompt || "",
+      loraScale: finiteNumber(node.data.loraScale, qwenCameraDefaults.loraScale),
+      guidanceScale: finiteNumber(node.data.guidanceScale, qwenCameraDefaults.guidanceScale),
+      numInferenceSteps: finiteNumber(node.data.numInferenceSteps, qwenCameraDefaults.numInferenceSteps),
+      projectId,
+      projectName,
+      nodeId: node.id,
+      nodeTitle: node.data.title
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Camera edit failed.");
+
+  return {
+    url: data.image.localUrl,
+    type: "image",
+    label: "Camera image",
+    prompt: data.prompt || "",
+    seed: data.seed,
+    cost: data.cost
+  };
+}
+
 async function runImageModelGeneration({ node, prompt, imagePromptItems, projectId, projectName, index }) {
   const response = await fetch("/api/node/generate-image", {
     method: "POST",
@@ -3047,13 +3415,14 @@ function nodeBatchStatusMessage(mediaType, total, completed, failures) {
 }
 
 function connectedPreviewSource(items = []) {
-  const source = items.filter(({ source: item }) => item.data.resultUrl).at(-1)?.source;
-  if (!source) return null;
+  const item = items.filter(({ source }) => source.data.resultUrl).at(-1);
+  if (!item) return null;
+  const { source, edge } = item;
 
   return {
     url: source.data.resultUrl,
     type: previewMediaType(source),
-    label: sourceLabel(source)
+    label: source.type === "camera" && edge.from.port === "imageOut" ? "Camera image" : sourceLabel(source)
   };
 }
 
@@ -3248,7 +3617,7 @@ function finiteNumber(value, fallback) {
 }
 
 function isRunnableNode(node) {
-  return ["text", "imageModel", "videoModel"].includes(node.type);
+  return ["text", "imageModel", "videoModel"].includes(node.type) || (node.type === "camera" && node.data.qwenCameraOpen);
 }
 
 function buildSelectedRunnableDependencies(nodes, edges) {
@@ -3265,13 +3634,15 @@ function buildSelectedRunnableDependencies(nodes, edges) {
 
 function nodeRunPriority(node) {
   if (node?.type === "text") return 0;
-  if (node?.type === "imageModel") return 1;
-  if (node?.type === "videoModel") return 2;
+  if (node?.type === "camera") return 1;
+  if (node?.type === "imageModel") return 2;
+  if (node?.type === "videoModel") return 3;
   return 3;
 }
 
 function runStageLabel(type) {
   if (type === "text") return "text";
+  if (type === "camera") return "camera";
   if (type === "imageModel") return "image";
   if (type === "videoModel") return "video";
   return "selected";
@@ -3397,9 +3768,14 @@ function normalizeEditorGraph(nodes = [], edges = [], groups = []) {
 
   return {
     nodes: normalizedNodes,
-    edges: dedupeEdges(normalizedEdges),
+    edges: normalizeEdgesForCurrentGraph(normalizedEdges, normalizedNodes),
     groups: normalizeGroups(groups, nodeMap)
   };
+}
+
+function normalizeEdgesForCurrentGraph(edges = [], nodes = []) {
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  return dedupeEdges(edges.map((edge) => normalizeEdgeForCurrentGraph(edge, nodeMap)).filter(Boolean));
 }
 
 function normalizeGroups(groups = [], nodeMap = new Map()) {
@@ -3454,7 +3830,9 @@ function splitLegacyDirectionNode(node) {
           title: "Camera",
           shotPreset: data.shotPreset || "None",
           lensPreset: data.lensPreset || "None",
-          typePreset: data.typePreset || "None"
+          typePreset: data.typePreset || "None",
+          qwenCameraOpen: false,
+          ...qwenCameraDefaults
         }
       }
     : null;
@@ -3529,6 +3907,7 @@ function normalizeEdgeForCurrentGraph(edge, nodeMap) {
   if (!source) return null;
 
   const nextEdge = cloneEdge(edge);
+  const target = nodeMap.get(edge.to.nodeId);
 
   if (source.type === "transfer") {
     nextEdge.from.port = "transferOut";
@@ -3537,8 +3916,13 @@ function normalizeEdgeForCurrentGraph(edge, nodeMap) {
   }
 
   if (source.type === "camera") {
-    nextEdge.from.port = "cameraOut";
-    nextEdge.color = portColors.camera;
+    if (isCameraImageEdge(nextEdge, target)) {
+      nextEdge.from.port = "imageOut";
+      nextEdge.color = portColors.image;
+    } else {
+      nextEdge.from.port = "cameraOut";
+      nextEdge.color = portColors.camera;
+    }
   }
 
   if (source.type === "style") {
@@ -3547,6 +3931,31 @@ function normalizeEdgeForCurrentGraph(edge, nodeMap) {
   }
 
   return nextEdge;
+}
+
+function isCameraImageEdge(edge, target) {
+  if (edge.from.port === "imageOut") return true;
+  if (edge.to.port === "sourceIn") return true;
+  if (target?.type === "text" && edge.to.port === "imageIn") return true;
+  if (target?.type === "camera" && edge.to.port === "imageIn") return true;
+  if (target?.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(edge.to.port)) return true;
+  if (target?.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(edge.to.port)) return true;
+  return false;
+}
+
+function sameEdgeList(first = [], second = []) {
+  if (first.length !== second.length) return false;
+  return first.every((edge, index) => {
+    const nextEdge = second[index];
+    return (
+      edge.id === nextEdge?.id &&
+      edge.from?.nodeId === nextEdge.from?.nodeId &&
+      edge.from?.port === nextEdge.from?.port &&
+      edge.to?.nodeId === nextEdge.to?.nodeId &&
+      edge.to?.port === nextEdge.to?.port &&
+      edge.color === nextEdge.color
+    );
+  });
 }
 
 function dedupeEdges(edges) {

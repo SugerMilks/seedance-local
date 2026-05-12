@@ -599,6 +599,96 @@ async function runSam3ImageSegmentation(req, res, { prompt, imagePromptUrls, ima
   });
 }
 
+app.post("/api/node/qwen-camera-edit", async (req, res) => {
+  try {
+    if (!process.env.FAL_KEY) {
+      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+    }
+
+    const imageUrl = firstLocalOutput(req.body.imageUrls);
+    if (!imageUrl) {
+      return res.status(400).json({ error: "Qwen Camera Edit requires a connected image." });
+    }
+
+    const endpoint = "fal-ai/qwen-image-edit-2511-multiple-angles";
+    const input = {
+      image_urls: [await uploadLocalOutputToFal(imageUrl)],
+      horizontal_angle: clampNumber(req.body.horizontalAngle, 0, 360, 90),
+      vertical_angle: clampNumber(req.body.verticalAngle, -30, 90, 0),
+      zoom: clampNumber(req.body.zoom, 0, 10, 5),
+      additional_prompt: String(req.body.additionalPrompt || "").trim(),
+      lora_scale: clampNumber(req.body.loraScale, 0, 2, 1),
+      guidance_scale: clampNumber(req.body.guidanceScale, 1, 12, 4.5),
+      num_inference_steps: clampInteger(req.body.numInferenceSteps, 1, 60, 28),
+      acceleration: "regular",
+      output_format: "png",
+      num_images: 1,
+      enable_safety_checker: true
+    };
+
+    const result = await fal.subscribe(endpoint, { input, logs: true });
+    const remoteImage = firstFalImageResult(result?.data);
+
+    if (!remoteImage?.url) {
+      return res.status(502).json({ error: "Fal returned no Qwen camera image URL.", raw: result?.data });
+    }
+
+    const output = await downloadImage(remoteImage.url, "qwen-camera-edit", remoteImage.content_type || remoteImage.mimeType);
+    const prompt = result?.data?.prompt || qwenCameraPromptLabel(input);
+    const cost = estimateQwenCameraEditCost({ endpoint, image: remoteImage });
+
+    await appendHistory({
+      id: result.requestId || randomUUID(),
+      createdAt: new Date().toISOString(),
+      mediaType: "image",
+      provider: "fal.ai",
+      modelName: "Qwen Image Edit 2511 Multiple Angles",
+      endpoint,
+      mode: "3D camera angle image edit",
+      prompt,
+      submittedPrompt: prompt,
+      project: projectFromBody(req.body),
+      node: nodeFromBody(req.body),
+      settings: {
+        horizontalAngle: input.horizontal_angle,
+        verticalAngle: input.vertical_angle,
+        zoom: input.zoom,
+        additionalPrompt: input.additional_prompt,
+        loraScale: input.lora_scale,
+        guidanceScale: input.guidance_scale,
+        numInferenceSteps: input.num_inference_steps,
+        acceleration: input.acceleration,
+        outputFormat: input.output_format,
+        sourceImageCount: 1,
+        seed: result?.data?.seed ?? null
+      },
+      cost,
+      remoteImage,
+      localImage: output.publicPath,
+      outputFileName: output.fileName,
+      outputBytes: output.bytes,
+      text: prompt
+    });
+
+    return res.json({
+      requestId: result.requestId,
+      endpoint,
+      prompt,
+      seed: result?.data?.seed,
+      cost,
+      image: {
+        ...remoteImage,
+        localUrl: output.publicPath,
+        fileName: output.fileName,
+        mimeType: output.mimeType
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message || "Qwen camera edit failed." });
+  }
+});
+
 app.post("/api/node/generate-video", async (req, res) => {
   try {
     if (!process.env.FAL_KEY) {
@@ -1485,6 +1575,25 @@ function estimateSam3VideoCost({ endpoint }) {
   };
 }
 
+function estimateQwenCameraEditCost({ endpoint, image }) {
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  const megapixels = width > 0 && height > 0 ? (width * height) / 1000000 : null;
+  const unitRateUsd = 0.035;
+
+  return {
+    amountUsd: megapixels ? roundCurrency(megapixels * unitRateUsd) : null,
+    currency: "USD",
+    unitRateUsd,
+    units: megapixels ? roundCurrency(megapixels) : null,
+    unit: "megapixel",
+    mediaType: "image",
+    pricingBasis: "Qwen Image Edit 2511 Multiple Angles fal.ai per-megapixel estimate",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
 function estimateImageCost({ resolution }) {
   const normalized = String(resolution || "2K").toUpperCase();
   const amountUsd = normalized.includes("4K") ? nanoBananaCost4K : nanoBananaCost1K2K;
@@ -2098,6 +2207,17 @@ function normalizeDuration(value) {
 function normalizeAspectRatio(value) {
   const normalized = String(value || "16:9").match(/\d+:\d+/)?.[0] || "16:9";
   return normalizeChoice(normalized, ["auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"], "16:9");
+}
+
+function qwenCameraPromptLabel(input) {
+  return [
+    `azimuth ${Math.round(input.horizontal_angle)} degrees`,
+    `elevation ${Math.round(input.vertical_angle)} degrees`,
+    `zoom ${Math.round(input.zoom * 10) / 10}`,
+    input.additional_prompt
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 function clampInteger(value, min, max, fallback) {
