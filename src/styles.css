@@ -50,6 +50,14 @@ button {
   padding: 24px 16px 16px;
 }
 
+.nodes-tab-keepalive {
+  display: none;
+}
+
+.nodes-tab-keepalive.active {
+  display: block;
+}
+
 .topbar {
   display: flex;
   align-items: center;

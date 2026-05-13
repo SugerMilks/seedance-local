@@ -20,6 +20,7 @@ const savedWorkflowsDir = path.join(rootDir, "saved_workflows");
 const dataDir = path.join(__dirname, "data");
 const historyPath = path.join(dataDir, "history.json");
 const nodeProjectsPath = path.join(dataDir, "node-projects.json");
+let historyWriteQueue = Promise.resolve();
 const port = Number(process.env.PORT || 3333);
 const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.014);
 const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.0112);
@@ -29,6 +30,7 @@ const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 
 const falTextRequestCost = Number(process.env.FAL_TEXT_REQUEST_COST || 0.001);
 const falVisionTextUnitCost = Number(process.env.FAL_VISION_TEXT_UNIT_COST || 0.01);
 const falVideoTextUnitCost = Number(process.env.FAL_VIDEO_TEXT_UNIT_COST || 0.01);
+const falUtilityImageTimeoutMs = Math.max(30000, Number(process.env.FAL_UTILITY_IMAGE_TIMEOUT_MS) || 180000);
 const openAiTextModel = process.env.OPENAI_TEXT_MODEL || "gpt-5.5";
 const openAiTextApiKey = process.env.OPENAI_TEXT_API_KEY || process.env.OPENAI_API_KEY;
 const openAiImageApiKey = process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY;
@@ -71,6 +73,10 @@ app.use("/outputs", express.static(outputsDir));
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
+    routes: {
+      utilityImage: true,
+      utilityVideo: true
+    },
     falKeyConfigured: Boolean(process.env.FAL_KEY),
     openAiKeyConfigured: Boolean(process.env.OPENAI_API_KEY || openAiTextApiKey || openAiImageApiKey),
     openAiTextKeyConfigured: Boolean(openAiTextApiKey),
@@ -378,7 +384,7 @@ app.post("/api/node/generate-image", async (req, res) => {
         resolution: req.body.resolution
       });
       const extension = extensionForMime(openAiImage.mimeType);
-      const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-openai-image-2${extension}`;
+      const fileName = uniqueOutputFileName("openai-image-2", extension);
       await writeFile(path.join(outputsDir, fileName), openAiImage.bytes);
 
       const cost = estimateOpenAiImage2Cost({
@@ -458,7 +464,7 @@ app.post("/api/node/generate-image", async (req, res) => {
 
     const mimeType = inlineData.mimeType || inlineData.mime_type || "image/png";
     const extension = extensionForMime(mimeType);
-    const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-nano-banana-pro${extension}`;
+    const fileName = uniqueOutputFileName("nano-banana-pro", extension);
     const imageBytes = Buffer.from(inlineData.data, "base64");
     await writeFile(path.join(outputsDir, fileName), imageBytes);
 
@@ -588,16 +594,353 @@ async function runSam3ImageSegmentation(req, res, { prompt, imagePromptUrls, ima
   return res.json({
     requestId: result.requestId,
     endpoint,
+    modelName: "SAM 3 Image",
     text,
     cost,
     image: {
       ...remoteImage,
+      label: "SAM 3 Image",
       localUrl: output.publicPath,
       fileName: output.fileName,
       mimeType: output.mimeType
     }
   });
 }
+
+app.post("/api/node/utility-image", async (req, res) => {
+  try {
+    if (!process.env.FAL_KEY) {
+      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+    }
+
+    const selectedModel = resolveUtilityImageModel(req.body.model);
+    const imageUrl = firstLocalOutput(req.body.imageUrls);
+    if (!imageUrl) {
+      return res.status(400).json({ error: `${selectedModel.displayName} requires a connected image.` });
+    }
+
+    if (selectedModel.provider === "fal-dwpose") {
+      return runDwposeUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
+    if (selectedModel.provider === "fal-depth-anything") {
+      return runDepthAnythingUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
+    if (selectedModel.provider === "fal-patina") {
+      return runPatinaUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
+    if (selectedModel.provider === "fal-sam3-image") {
+      const prompt = String(req.body.prompt || "").trim();
+      if (!prompt) {
+        return res.status(400).json({ error: "SAM 3 Image requires a segmentation prompt." });
+      }
+
+      return runSam3ImageSegmentation(req, res, {
+        prompt,
+        imagePromptUrls: [imageUrl],
+        imagePromptLabels: ["Utility image"]
+      });
+    }
+
+    return res.status(400).json({ error: "Unsupported Utility image model." });
+  } catch (error) {
+    console.error(error);
+    res.status(errorStatusCode(error)).json({ error: publicErrorMessage(error, "Utility image failed.") });
+  }
+});
+
+async function subscribeToFalWithTimeout(endpoint, input, label, timeoutMs = falUtilityImageTimeoutMs) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      fal.subscribe(endpoint, { input, logs: true }),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          const error = new Error(`${label} timed out waiting for Fal. Try again in a moment.`);
+          error.statusCode = 504;
+          reject(error);
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function runDwposeUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const drawMode = normalizeChoice(req.body.dwposeDrawMode, ["full-pose", "body-pose", "face-pose", "hand-pose", "face-hand-mask", "face-mask", "hand-mask"], "body-pose");
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    draw_mode: drawMode
+  };
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImage = firstFalImageResult(result?.data);
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no DWPose image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "dwpose", remoteImage.content_type || remoteImage.mimeType);
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "DWPose fal.ai image utility request; local price estimate not configured"
+  });
+  const text = `DWPose ${drawMode.replace(/-/g, " ")} map.`;
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "DWPose image pose preprocessor",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedModel.displayName,
+      drawMode,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage,
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      label: selectedModel.displayName,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    },
+    images: [
+      {
+        ...remoteImage,
+        label: selectedModel.displayName,
+        localUrl: output.publicPath,
+        fileName: output.fileName,
+        mimeType: output.mimeType
+      }
+    ]
+  });
+}
+
+async function runDepthAnythingUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl)
+  };
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImage = firstFalImageResult(result?.data);
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no Depth Anything image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "depth-anything", remoteImage.content_type || remoteImage.mimeType);
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "Depth Anything v2 fal.ai image preprocessor request; local price estimate not configured"
+  });
+  const text = "Depth Anything v2 map.";
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "Depth Anything image depth preprocessor",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedModel.displayName,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage,
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      label: selectedModel.displayName,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    },
+    images: [
+      {
+        ...remoteImage,
+        label: selectedModel.displayName,
+        localUrl: output.publicPath,
+        fileName: output.fileName,
+        mimeType: output.mimeType
+      }
+    ]
+  });
+}
+
+async function runPatinaUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const maps = normalizePatinaMaps(req.body.patinaMaps);
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    maps,
+    enable_safety_checker: true,
+    output_format: normalizeChoice(req.body.patinaOutputFormat, ["jpeg", "png", "webp"], "png")
+  };
+  const seed = optionalInteger(req.body.patinaSeed);
+  if (seed !== undefined) input.seed = seed;
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImages = falImageResults(result?.data);
+
+  if (!remoteImages.length) {
+    return res.status(502).json({ error: "Fal returned no Patina map image URLs.", raw: result?.data });
+  }
+
+  const outputs = [];
+  for (const [index, remoteImage] of remoteImages.entries()) {
+    const mapType = normalizePatinaMapId(remoteImage.map_type || maps[index]) || `map-${index + 1}`;
+    const output = await downloadImage(remoteImage.url, `patina-${mapType}`, remoteImage.content_type || remoteImage.mimeType);
+    outputs.push({
+      remoteImage,
+      output,
+      mapType,
+      label: `Patina ${formatPatinaMapLabel(mapType)}`
+    });
+  }
+
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "Patina fal.ai image-to-PBR-maps request; local price estimate not configured"
+  });
+  const text = `Patina ${outputs.map((item) => formatPatinaMapLabel(item.mapType)).join(", ")} maps.`;
+  const outputBytes = outputs.reduce((sum, item) => sum + item.output.bytes, 0);
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "Patina image PBR map preprocessor",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedModel.displayName,
+      maps,
+      outputFormat: input.output_format,
+      seed: result?.data?.seed ?? input.seed ?? null,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage: remoteImages[0],
+    remoteImages,
+    localImage: outputs[0].output.publicPath,
+    localImages: outputs.map((item) => item.output.publicPath),
+    outputFileName: outputs[0].output.fileName,
+    outputBytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    seed: result?.data?.seed ?? input.seed,
+    cost,
+    image: {
+      ...outputs[0].remoteImage,
+      label: outputs[0].label,
+      localUrl: outputs[0].output.publicPath,
+      fileName: outputs[0].output.fileName,
+      mimeType: outputs[0].output.mimeType
+    },
+    images: outputs.map(({ remoteImage, output, label, mapType }) => ({
+      ...remoteImage,
+      label,
+      mapType,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    }))
+  });
+}
+
+app.post("/api/node/utility-video", async (req, res) => {
+  try {
+    if (!process.env.FAL_KEY) {
+      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+    }
+
+    const prompt = String(req.body.prompt || "").trim();
+    if (!prompt) {
+      return res.status(400).json({ error: "Prompt is required." });
+    }
+
+    const selectedVideoModel = resolveUtilityVideoModel(req.body.model);
+    const referenceImageUrls = Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [];
+    const referenceVideoUrls = Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : [];
+
+    if (selectedVideoModel.provider === "fal-sam3-video") {
+      return runSam3VideoSegmentation(req, res, {
+        prompt,
+        referenceVideoUrls
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-wan-fun-control") {
+      return runWanFunControlVideo(req, res, {
+        prompt,
+        referenceImageUrls,
+        referenceVideoUrls
+      });
+    }
+
+    return res.status(400).json({ error: "Unsupported Utility video model." });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message || "Utility video failed." });
+  }
+});
 
 app.post("/api/node/qwen-camera-edit", async (req, res) => {
   try {
@@ -839,12 +1182,13 @@ async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }
   }
 
   const endpoint = "fal-ai/sam-3/video";
+  const options = req.body.sam3Video || {};
   const input = {
     video_url: await uploadLocalOutputToFal(videoUrl),
     prompt,
     apply_mask: true,
     video_output_type: "X264 (.mp4)",
-    detection_threshold: 0.5
+    detection_threshold: clampNumber(options.detectionThreshold, 0, 1, 0.5)
   };
 
   const result = await fal.subscribe(endpoint, { input, logs: true });
@@ -887,6 +1231,7 @@ async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }
   return res.json({
     requestId: result.requestId,
     endpoint,
+    modelName: "SAM 3 Video",
     cost,
     video: {
       ...remoteVideo,
@@ -1043,6 +1388,7 @@ async function runWanFunControlVideo(req, res, { prompt, referenceImageUrls, ref
     requestId: result.requestId,
     seed: result?.data?.seed ?? input.seed,
     endpoint,
+    modelName: "Wan Fun Control",
     cost,
     video: {
       ...remoteVideo,
@@ -1369,7 +1715,7 @@ async function downloadVideo(url, kind) {
   }
 
   const extension = path.extname(new URL(url).pathname) || ".mp4";
-  const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${kind}${extension}`;
+  const fileName = uniqueOutputFileName(kind, extension);
   const outputPath = path.join(outputsDir, fileName);
   const bytes = Buffer.from(await response.arrayBuffer());
   await writeFile(outputPath, bytes);
@@ -1389,7 +1735,7 @@ async function downloadImage(url, kind, mimeTypeHint = "") {
 
   const mimeType = normalizeMimeType(mimeTypeHint || response.headers.get("content-type") || "image/png");
   const extension = imageExtensionForUrl(url, mimeType);
-  const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${kind}${extension}`;
+  const fileName = uniqueOutputFileName(kind, extension);
   const outputPath = path.join(outputsDir, fileName);
   const bytes = Buffer.from(await response.arrayBuffer());
   await writeFile(outputPath, bytes);
@@ -1400,6 +1746,13 @@ async function downloadImage(url, kind, mimeTypeHint = "") {
     bytes: bytes.length,
     mimeType
   };
+}
+
+function uniqueOutputFileName(kind, extension) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeKind = String(kind || "output").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "output";
+  const safeExtension = String(extension || "").startsWith(".") ? extension : `.${extension || "bin"}`;
+  return `${timestamp}-${safeKind}-${randomUUID().slice(0, 8)}${safeExtension}`;
 }
 
 function imageExtensionForUrl(url, mimeType) {
@@ -1437,6 +1790,20 @@ function firstFalImageResult(data) {
     normalizeFalFile(data?.result);
 
   return knownResult || findFalMediaFile(data, "image/");
+}
+
+function falImageResults(data) {
+  const candidates = [];
+  if (Array.isArray(data?.images)) candidates.push(...data.images);
+  if (Array.isArray(data?.outputs)) candidates.push(...data.outputs);
+  if (data?.image) candidates.push(data.image);
+  if (data?.output_image) candidates.push(data.output_image);
+
+  const normalized = candidates.map(normalizeFalFile).filter((file) => file?.url);
+  if (normalized.length) return normalized;
+
+  const fallback = firstFalImageResult(data);
+  return fallback?.url ? [fallback] : [];
 }
 
 function findFalMediaFile(value, mimePrefix, seen = new Set()) {
@@ -1480,13 +1847,64 @@ async function readHistory() {
 }
 
 async function appendHistory(item) {
-  const history = await readHistory();
-  history.unshift(item);
-  await writeHistory(history.slice(0, 500));
+  const write = historyWriteQueue.then(async () => {
+    const history = await readHistory();
+    history.unshift(item);
+    await writeHistory(history.slice(0, 500));
+  });
+  historyWriteQueue = write.catch(() => {});
+  return write;
 }
 
 async function writeHistory(history) {
   await writeFile(historyPath, JSON.stringify(history, null, 2));
+}
+
+function errorStatusCode(error) {
+  const status = Number(error?.statusCode || error?.status || error?.response?.status);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500;
+}
+
+function publicErrorMessage(error, fallback) {
+  const candidates = [
+    error?.message,
+    error?.body?.detail,
+    error?.body?.message,
+    error?.body?.error,
+    error?.data?.detail,
+    error?.data?.message,
+    error?.data?.error,
+    error?.response?.data?.detail,
+    error?.response?.data?.message,
+    error?.response?.data?.error,
+    error?.cause?.message,
+    typeof error === "string" ? error : ""
+  ];
+
+  for (const candidate of candidates) {
+    const message = publicErrorDetail(candidate);
+    if (message) return message;
+  }
+
+  return fallback;
+}
+
+function publicErrorDetail(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) return value.map(publicErrorDetail).filter(Boolean).join(" ");
+  if (typeof value === "object") {
+    const direct = publicErrorDetail(value.msg || value.message || value.detail || value.error);
+    if (direct) return direct;
+
+    try {
+      return JSON.stringify(value).slice(0, 700);
+    } catch {
+      return "";
+    }
+  }
+
+  return String(value).trim();
 }
 
 function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind }) {
@@ -1571,6 +1989,20 @@ function estimateSam3VideoCost({ endpoint }) {
     mediaType: "video",
     pricingBasis: "SAM 3 video segmentation fal.ai pricing estimate at $0.005 per 16 frames; local frame count unavailable",
     pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
+function estimateFalImageUtilityCost({ endpoint, mediaType, pricingBasis }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: 1,
+    unit: "request",
+    mediaType,
+    pricingBasis,
+    pricingSource: "fal-model-page-2026-05-13",
     endpoint
   };
 }
@@ -1927,6 +2359,57 @@ function resolveImageModel(model) {
   };
 }
 
+function resolveUtilityImageModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("image")) {
+    return {
+      provider: "fal-sam3-image",
+      displayName: "SAM 3 Image",
+      id: "fal-ai/sam-3/image"
+    };
+  }
+
+  if (normalized.includes("depth") || normalized.includes("anything")) {
+    return {
+      provider: "fal-depth-anything",
+      displayName: "Depth Anything",
+      id: "fal-ai/image-preprocessors/depth-anything/v2"
+    };
+  }
+
+  if (normalized.includes("patina")) {
+    return {
+      provider: "fal-patina",
+      displayName: "Patina",
+      id: "fal-ai/patina"
+    };
+  }
+
+  return {
+    provider: "fal-dwpose",
+    displayName: "DWPose",
+    id: "fal-ai/dwpose"
+  };
+}
+
+function resolveUtilityVideoModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("video")) {
+    return {
+      provider: "fal-sam3-video",
+      displayName: "SAM 3 Video",
+      id: "fal-ai/sam-3/video"
+    };
+  }
+
+  return {
+    provider: "fal-wan-fun-control",
+    displayName: "Wan Fun Control",
+    id: "fal-ai/wan-fun-control",
+    speed: "wan"
+  };
+}
+
 function resolveVideoModel(model) {
   const normalized = String(model || "").toLowerCase();
   if (normalized.includes("sam") && normalized.includes("video")) {
@@ -2236,6 +2719,22 @@ function optionalInteger(value) {
   if (value === "" || value === null || value === undefined) return undefined;
   const number = Math.round(Number(value));
   return Number.isFinite(number) ? number : undefined;
+}
+
+function normalizePatinaMaps(value) {
+  const values = Array.isArray(value) ? value : [];
+  const maps = [...new Set(values.map(normalizePatinaMapId).filter(Boolean))];
+  return maps.length ? maps : ["basecolor", "normal", "roughness", "metalness", "height"];
+}
+
+function normalizePatinaMapId(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["basecolor", "normal", "roughness", "metalness", "height"].includes(normalized) ? normalized : "";
+}
+
+function formatPatinaMapLabel(value) {
+  if (value === "basecolor") return "Basecolor";
+  return String(value || "Map").replace(/^\w/, (letter) => letter.toUpperCase());
 }
 
 function firstLocalOutput(value) {

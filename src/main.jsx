@@ -581,11 +581,13 @@ function App() {
 
           <Gallery history={videoHistory} onRemove={removeHistoryItem} />
         </>
-      ) : workspaceMode === "nodes" ? (
-        <NodeEditor />
-      ) : (
+      ) : workspaceMode === "stats" ? (
         <StatsDashboard />
-      )}
+      ) : null}
+
+      <div className={`nodes-tab-keepalive ${workspaceMode === "nodes" ? "active" : ""}`} aria-hidden={workspaceMode !== "nodes"}>
+        <NodeEditor active={workspaceMode === "nodes"} />
+      </div>
     </main>
   );
 }

@@ -23,6 +23,7 @@ import {
   Type,
   Unlock,
   Video,
+  Wrench,
   X
 } from "lucide-react";
 import "./nodeEditor.css";
@@ -33,6 +34,7 @@ const nodeCatalog = [
   { type: "camera", label: "Camera", icon: Camera },
   { type: "style", label: "Style", icon: Palette },
   { type: "transfer", label: "Transfer", icon: Compass },
+  { type: "utility", label: "Utility", icon: Wrench },
   { type: "video", label: "Video", icon: Video },
   { type: "audio", label: "Audio", icon: FileAudio },
   { type: "preview", label: "Preview", icon: MonitorPlay },
@@ -175,7 +177,7 @@ const initialEdges = [
   { id: "edge-2", from: { nodeId: "image-1", port: "imageOut" }, to: { nodeId: "image-model-1", port: "imagePromptIn" }, color: portColors.image }
 ];
 
-const contextMenuSize = { width: 190, height: 382, inset: 8 };
+const contextMenuSize = { width: 190, height: 420, inset: 8 };
 const minZoom = 0.35;
 const maxZoom = 1.9;
 const nodeDraftStorageKey = "seedance-node-editor-draft-v1";
@@ -192,9 +194,26 @@ const videoModelNames = {
   aurora: "Creatify Aurora",
   sam3Video: "SAM 3 Video"
 };
+const utilityImageModelNames = {
+  dwpose: "DWPose",
+  depthAnything: "Depth Anything",
+  patina: "Patina",
+  sam3Image: "SAM 3 Image"
+};
+const patinaMapOptions = [
+  { id: "basecolor", label: "Basecolor" },
+  { id: "normal", label: "Normal" },
+  { id: "roughness", label: "Roughness" },
+  { id: "metalness", label: "Metalness" },
+  { id: "height", label: "Height" }
+];
+const utilityVideoModelNames = {
+  wanFunControl: "Wan Fun Control",
+  sam3Video: "SAM 3 Video"
+};
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 
-export default function NodeEditor() {
+export default function NodeEditor({ active = true } = {}) {
   const canvasRef = React.useRef(null);
   const projectMenuRef = React.useRef(null);
   const workflowFileInputRef = React.useRef(null);
@@ -252,13 +271,19 @@ export default function NodeEditor() {
   }, [edges, nodes]);
 
   React.useLayoutEffect(() => {
-    updatePortPositions();
-    updateSelectionBounds();
-  }, [nodes, viewport, selectedNodeIds]);
+    if (!active) return undefined;
+
+    const frame = window.requestAnimationFrame(() => {
+      updatePortPositions();
+      updateSelectionBounds();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, nodes, viewport, selectedNodeIds]);
 
   React.useLayoutEffect(() => {
+    if (!active) return;
     syncGroupMembership();
-  }, [nodes, groups, viewport]);
+  }, [active, nodes, groups, viewport]);
 
   React.useEffect(() => {
     loadProjects();
@@ -284,10 +309,11 @@ export default function NodeEditor() {
   }, [nodes, edges, groups, viewport, projectId, projectName, savedProjectName]);
 
   React.useEffect(() => {
+    if (!active) return undefined;
     const handleResize = () => updatePortPositions();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [viewport]);
+  }, [active, viewport]);
 
   React.useEffect(() => {
     if (selectedEdgeId && !edges.some((edge) => edge.id === selectedEdgeId)) {
@@ -296,6 +322,7 @@ export default function NodeEditor() {
   }, [edges, selectedEdgeId]);
 
   React.useEffect(() => {
+    if (!active) return undefined;
     function handleKeyDown(event) {
       const commandKey = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
@@ -341,9 +368,10 @@ export default function NodeEditor() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNodeIds, selectedEdgeId, nodes, edges, groups, viewport, projectId, projectName, savedProjectName, selectedProjectName]);
+  }, [active, selectedNodeIds, selectedEdgeId, nodes, edges, groups, viewport, projectId, projectName, savedProjectName, selectedProjectName]);
 
   React.useEffect(() => {
+    if (!active) return undefined;
     function handlePointerDown(event) {
       if (!projectMenuRef.current?.contains(event.target)) {
         setProjectMenuOpen(false);
@@ -355,9 +383,10 @@ export default function NodeEditor() {
 
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, []);
+  }, [active]);
 
   React.useEffect(() => {
+    if (!active) return undefined;
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -367,9 +396,10 @@ export default function NodeEditor() {
 
     canvas.addEventListener("wheel", handleWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", handleWheel);
-  }, []);
+  }, [active]);
 
   React.useEffect(() => {
+    if (!active) return undefined;
     function blockPagePinchOutsideCanvas(event) {
       if (!event.ctrlKey && !event.metaKey) return;
 
@@ -396,7 +426,7 @@ export default function NodeEditor() {
       window.removeEventListener("gesturestart", blockBrowserGestureOutsideCanvas, { capture: true });
       window.removeEventListener("gesturechange", blockBrowserGestureOutsideCanvas, { capture: true });
     };
-  }, []);
+  }, [active]);
 
   function updatePortPositions() {
     const canvas = canvasRef.current;
@@ -463,19 +493,48 @@ export default function NodeEditor() {
   function addNode(type, position) {
     const count = nodes.filter((node) => node.type === type).length + 1;
     const spec = nodeCatalog.find((item) => item.type === type);
+    const nodePosition = position || defaultNodePosition(count);
     pushUndoSnapshot();
     setSelectedEdgeId(null);
     setNodes((current) => [
       ...current,
       {
-        id: `${type}-${Date.now()}`,
+        id: createNodeId(type),
         type,
-        x: position?.x ?? 180 + count * 28,
-        y: position?.y ?? 160 + count * 24,
+        x: nodePosition.x,
+        y: nodePosition.y,
         data: createDefaultNodeData(type, spec?.label || "Node", count)
       }
     ]);
     setContextMenu(null);
+  }
+
+  function defaultNodePosition(count) {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return {
+        x: 180 + count * 28,
+        y: 160 + count * 24
+      };
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const sceneCenter = screenToScene(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    const cascadeOffset = ((count - 1) % 6) * 28;
+    return {
+      x: sceneCenter.x - 170 + cascadeOffset,
+      y: sceneCenter.y - 120 + cascadeOffset
+    };
+  }
+
+  function pointerNodePosition(event) {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    const clientX = clamp(event.clientX, rect.left + 16, rect.right - 16);
+    const clientY = clamp(event.clientY, rect.top + 16, rect.bottom - 16);
+    return screenToScene(clientX, clientY);
   }
 
   function removeNode(nodeId) {
@@ -597,21 +656,37 @@ export default function NodeEditor() {
   }
 
   function updateNode(nodeId, patch) {
+    let nextUtilityData = null;
     setNodes((current) => {
       const nextNodes = current.map((node) =>
         node.id === nodeId
-          ? {
-              ...node,
-              data: {
+          ? (() => {
+              const data = {
                 ...node.data,
                 ...patch
-              }
-            }
+              };
+              if (node.type === "utility") nextUtilityData = data;
+              return {
+                ...node,
+                data
+              };
+            })()
           : node
       );
       nodesRef.current = nextNodes;
       return nextNodes;
     });
+
+    if (nextUtilityData && ("utilityMode" in patch || "utilityImageModel" in patch || "utilityVideoModel" in patch)) {
+      const activePorts = new Set(utilityInputPortIds(nextUtilityData.utilityMode, nextUtilityData.utilityImageModel, nextUtilityData.utilityVideoModel));
+      setEdges((current) =>
+        current.filter((edge) => {
+          const staleOutput = "utilityMode" in patch && edge.from.nodeId === nodeId;
+          const inactiveInput = edge.to.nodeId === nodeId && !activePorts.has(edge.to.port);
+          return !staleOutput && !inactiveInput;
+        })
+      );
+    }
   }
 
   async function uploadMediaAsset(node, file) {
@@ -1160,6 +1235,7 @@ export default function NodeEditor() {
         if (target.type === "camera" && to.port === "imageIn") return "";
         if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
         if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
+        if (target.type === "utility" && ["imageIn", "referenceImageIn"].includes(to.port)) return "";
         return "Camera image output connects to image inputs";
       }
 
@@ -1181,12 +1257,52 @@ export default function NodeEditor() {
 
     if (source.type === "transfer") {
       if (!source.data.activated || !source.data.resultUrl) return "Lock Transfer to enable TRANSFER.png output";
-      if ((target.type === "imageModel" && to.port === "transferIn") || (target.type === "preview" && to.port === "sourceIn")) return "";
+      if (
+        (target.type === "imageModel" && to.port === "transferIn") ||
+        (target.type === "utility" && ["imageIn", "referenceImageIn"].includes(to.port)) ||
+        (target.type === "preview" && to.port === "sourceIn")
+      )
+        return "";
       return "Transfer connects to the Image Model transfer input or previews";
     }
 
+    if (source.type === "utility") {
+      if (utilityOutputType(source) === "video") {
+        if (target.type === "preview" && to.port === "sourceIn") return "";
+        if (target.type === "text" && to.port === "videoIn") return "";
+        if (target.type === "videoModel" && to.port === "referenceVideoIn") return "";
+        if (target.type === "utility" && to.port === "referenceVideoIn") return "";
+        return "Utility video output connects to video inputs";
+      }
+
+      if (target.type === "preview" && to.port === "sourceIn") return "";
+      if (target.type === "text" && to.port === "imageIn") return "";
+      if (target.type === "camera" && to.port === "imageIn") return "";
+      if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
+      if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
+      if (target.type === "utility" && ["imageIn", "referenceImageIn"].includes(to.port)) return "";
+      return "Utility image output connects to image inputs";
+    }
+
+    if (target?.type === "utility") {
+      if (to.port === "promptIn") {
+        if (["text", "imageModel", "videoModel"].includes(source.type)) return "";
+        return "Prompt input accepts text outputs";
+      }
+
+      if (["imageIn", "referenceImageIn"].includes(to.port)) {
+        if (["image", "imageModel", "transfer"].includes(source.type)) return "";
+        return "Image input accepts image outputs";
+      }
+
+      if (to.port === "referenceVideoIn") {
+        if (["video", "videoModel"].includes(source.type)) return "";
+        return "Video input accepts video outputs";
+      }
+    }
+
     if (target?.type === "preview") {
-      if (["image", "video", "imageModel", "videoModel", "transfer"].includes(source?.type)) return "";
+      if (["image", "video", "imageModel", "videoModel", "utility", "transfer"].includes(source?.type)) return "";
       return "Preview accepts image and video sources";
     }
 
@@ -1216,7 +1332,30 @@ export default function NodeEditor() {
   }
 
   function getPortPoint(nodeId, port) {
-    return portPositions[`${nodeId}:${port}`] || { x: 0, y: 0 };
+    return portPositions[`${nodeId}:${port}`] || estimatePortPoint(nodeId, port);
+  }
+
+  function estimatePortPoint(nodeId, portId) {
+    const node = nodesRef.current.find((item) => item.id === nodeId);
+    if (!node) return { x: 0, y: 0 };
+
+    const bounds = getNodeBounds(nodeId);
+    const hasMeasuredBounds = bounds.right > bounds.left && bounds.bottom > bounds.top;
+    const left = hasMeasuredBounds ? bounds.left : node.x;
+    const right = hasMeasuredBounds ? bounds.right : node.x + estimatedNodeWidth(node.type);
+    const top = hasMeasuredBounds ? bounds.top : node.y;
+    const bottom = hasMeasuredBounds ? bounds.bottom : node.y + 260;
+    const ports = visiblePortIdsForNode(node);
+    const portIndex = Math.max(0, ports.findIndex((id) => id === portId));
+    const portCount = Math.max(ports.length, 1);
+    const isOutput = outputPortIdsForNode(node).includes(portId);
+    const sideX = isOutput ? right : left;
+    const y = top + ((portIndex + 1) / (portCount + 1)) * (bottom - top);
+
+    return {
+      x: sideX,
+      y
+    };
   }
 
   function pushUndoSnapshot() {
@@ -1261,7 +1400,7 @@ export default function NodeEditor() {
     const stamp = Date.now();
     const idMap = new Map();
     const pastedNodes = clipboard.nodes.map((node, index) => {
-      const nextId = `${node.type}-${stamp}-${index}`;
+      const nextId = createNodeId(node.type, `${stamp}-${index}`);
       const nextNode = cloneNode(node);
       idMap.set(node.id, nextId);
       return {
@@ -1269,10 +1408,10 @@ export default function NodeEditor() {
         id: nextId,
         x: node.x + 42,
         y: node.y + 42,
-        data: {
+        data: resetCopiedNodeRuntime({
           ...nextNode.data,
           title: `${node.data.title || node.type} Copy`
-        }
+        })
       };
     });
     const pastedEdges = clipboard.edges
@@ -1432,7 +1571,8 @@ export default function NodeEditor() {
     const basePrompt = connectedText(incoming.promptIn) || currentNode.data.prompt;
     const isSingleRunSegmentation =
       (currentNode.type === "imageModel" && isSam3ImageModel(currentNode.data.model)) ||
-      (currentNode.type === "videoModel" && isSam3VideoModel(currentNode.data.model));
+      (currentNode.type === "videoModel" && isSam3VideoModel(currentNode.data.model)) ||
+      (currentNode.type === "utility" && utilityMode(currentNode) === "video" && isUtilitySam3VideoModel(currentNode.data.utilityVideoModel));
     const batchCount = isSingleRunSegmentation ? 1 : nodeBatchCount(currentNode);
 
     try {
@@ -1463,6 +1603,56 @@ export default function NodeEditor() {
           error: "",
           resultText: processed.text,
           lastRunModel: processed.model
+        });
+        return { status: "complete" };
+      }
+
+      if (currentNode.type === "utility") {
+        if (utilityMode(currentNode) === "image") {
+          const generatedItems = await runUtilityImageGeneration({
+            node: currentNode,
+            prompt: basePrompt,
+            incoming,
+            projectId,
+            projectName
+          });
+          if (!generatedItems.length) throw new Error("Utility image returned no image.");
+          const generated = generatedItems[0];
+          updateNode(currentNode.id, {
+            status: "complete",
+            resultUrl: generated.url,
+            resultItems: generatedItems,
+            selectedResultIndex: 0,
+            resultText: generatedItems.map((item) => item.text).filter(Boolean).join("\n\n"),
+            resultType: "image",
+            error: ""
+          });
+          return { status: "complete" };
+        }
+
+        const runs = Array.from({ length: batchCount }, (_, index) =>
+          runUtilityVideoGeneration({
+            node: currentNode,
+            prompt: basePrompt,
+            incoming,
+            projectId,
+            projectName,
+            index
+          })
+        );
+        const settled = await Promise.allSettled(runs);
+        const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+        const failures = settled.filter((item) => item.status === "rejected");
+        if (!successes.length) throw new Error(failures[0]?.reason?.message || "Utility video failed.");
+
+        updateNode(currentNode.id, {
+          status: "complete",
+          resultUrl: successes[0].url,
+          resultItems: successes,
+          selectedResultIndex: 0,
+          resultText: "",
+          resultType: "video",
+          error: failures.length ? nodeBatchStatusMessage("video", batchCount, successes.length, failures) : ""
         });
         return { status: "complete" };
       }
@@ -1669,7 +1859,7 @@ export default function NodeEditor() {
         {nodeCatalog.map((item) => {
           const Icon = item.icon;
           return (
-            <button key={item.type} onClick={() => addNode(item.type)} title={`Add ${item.label}`}>
+            <button key={item.type} onClick={(event) => addNode(item.type, pointerNodePosition(event))} title={`Add ${item.label}`}>
               <Icon size={17} />
               <span>{item.label}</span>
               <Plus size={14} />
@@ -2632,6 +2822,233 @@ function NodeBody({
     );
   }
 
+  if (node.type === "utility") {
+    const mode = utilityMode(node);
+    const isVideoMode = mode === "video";
+    const settingsOpen = Boolean(node.data.settingsOpen);
+    const imagePort = config.input.find((port) => port.id === "imageIn");
+    const promptPort = config.input.find((port) => port.id === "promptIn");
+    const referenceImagePort = config.input.find((port) => port.id === "referenceImageIn");
+    const referenceVideoPort = config.input.find((port) => port.id === "referenceVideoIn");
+    const utilityImageModel = normalizedUtilityImageModelName(node.data.utilityImageModel);
+    const isDepthAnything = isDepthAnythingModel(utilityImageModel);
+    const isPatina = isPatinaModel(utilityImageModel);
+    const isSam3Image = isUtilitySam3ImageModel(utilityImageModel);
+    const isSam3Video = isUtilitySam3VideoModel(node.data.utilityVideoModel);
+    const utilityOutputPort = {
+      ...config.output[0],
+      label: isVideoMode ? "Video output" : "Image output",
+      color: isVideoMode ? portColors.video : portColors.image
+    };
+    const promptValue = connectedText(incoming.promptIn) || node.data.prompt || "";
+    const promptConnected = Boolean(connectedText(incoming.promptIn));
+    const collapsedPorts = isVideoMode ? (isSam3Video ? [promptPort, referenceVideoPort] : [promptPort, referenceVideoPort, referenceImagePort]) : isSam3Image ? [promptPort, imagePort] : [imagePort];
+    const resultType = node.data.resultType || mode;
+    const canRun = isVideoMode
+      ? Boolean(incoming.referenceVideoIn?.length) && Boolean(promptValue.trim())
+      : Boolean(incoming.imageIn?.length) && (!isSam3Image || Boolean(promptValue.trim()));
+    const utilityRunLabel = isVideoMode ? (isSam3Video ? "Run SAM 3 Video" : "Run Wan Fun Control") : isSam3Image ? "Run SAM 3 Image" : isPatina ? "Run Patina" : isDepthAnything ? "Run Depth Map" : "Run DWPose";
+
+    function setMode(nextMode) {
+      if (mode === nextMode) return;
+      onUpdate(node.id, {
+        utilityMode: nextMode,
+        resultUrl: "",
+        resultItems: [],
+        selectedResultIndex: 0,
+        resultText: "",
+        resultType: nextMode,
+        status: "ready",
+        error: ""
+      });
+    }
+
+    function togglePatinaMap(mapId) {
+      const currentMaps = patinaMapsForData(node.data);
+      if (currentMaps.length === 1 && currentMaps.includes(mapId)) return;
+      const nextMaps = currentMaps.includes(mapId) ? currentMaps.filter((item) => item !== mapId) : [...currentMaps, mapId];
+      onUpdate(node.id, { patinaMaps: nextMaps });
+    }
+
+    return (
+      <div className="node-body model-node-body utility-node-body">
+        <div className="utility-mode-tabs" role="tablist" aria-label="Utility mode">
+          <button className={mode === "image" ? "active" : ""} type="button" role="tab" aria-selected={mode === "image"} onClick={() => setMode("image")}>
+            Image
+          </button>
+          <button className={mode === "video" ? "active" : ""} type="button" role="tab" aria-selected={mode === "video"} onClick={() => setMode("video")}>
+            Video
+          </button>
+        </div>
+        <ResultPane
+          label="Results will appear here"
+          resultUrl={node.data.resultUrl}
+          resultItems={node.data.resultItems}
+          selectedIndex={node.data.selectedResultIndex}
+          type={resultType}
+          status={node.data.status}
+          error={node.data.error}
+          onSelectResult={(index, item) => onUpdate(node.id, { selectedResultIndex: index, resultUrl: item.url })}
+        />
+        <OutputPortRow node={node} port={utilityOutputPort} label={utilityOutputPort.label} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
+        {!settingsOpen && (
+          <div className="model-input-port-stack utility-input-port-stack" aria-label="Utility inputs">
+            {collapsedPorts.filter(Boolean).map((port) => (
+              <PortHandle
+                key={port.id}
+                node={node}
+                port={port}
+                side="input"
+                onConnectStart={onConnectStart}
+                onDisconnectInput={onDisconnectInput}
+                connectedPortKeys={connectedPortKeys}
+              />
+            ))}
+          </div>
+        )}
+        <button className="run-node-button" onClick={() => onRun(node)} disabled={running || !canRun}>
+          {running ? (isVideoMode ? "Running Video..." : "Running Image...") : utilityRunLabel}
+        </button>
+        <details className="model-settings-drawer" open={settingsOpen} onToggle={(event) => onUpdate(node.id, { settingsOpen: event.currentTarget.open })}>
+          <summary>{isVideoMode ? "Video" : "Image"}</summary>
+          {isVideoMode ? (
+            <>
+              <NodeRow label="Model">
+                <select value={node.data.utilityVideoModel || utilityVideoModelNames.wanFunControl} onChange={(event) => onUpdate(node.id, { utilityVideoModel: event.target.value, resultUrl: "", resultItems: [], resultType: "video", error: "" })}>
+                  <option>{utilityVideoModelNames.wanFunControl}</option>
+                  <option>{utilityVideoModelNames.sam3Video}</option>
+                </select>
+              </NodeRow>
+              <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
+              </NodeRow>
+              {!isSam3Video && (
+                <NodeRow label="Generations">
+                  <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
+                    {batchOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {formatNodeBatchCount(option)}
+                      </option>
+                    ))}
+                  </select>
+                </NodeRow>
+              )}
+              <NodeRow label={isSam3Video ? "Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add video")}</button>
+              </NodeRow>
+              {isSam3Video ? (
+                <NodeRow label="Threshold">
+                  <input type="number" min="0" max="1" step="0.05" value={node.data.sam3VideoDetectionThreshold ?? 0.5} onChange={(event) => onUpdate(node.id, { sam3VideoDetectionThreshold: event.target.value })} />
+                </NodeRow>
+              ) : (
+                <>
+                  <NodeRow label="Reference Image" inputPort={settingsOpen ? referenceImagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                    <button className={incoming.referenceImageIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceImageIn, "Optional image")}</button>
+                  </NodeRow>
+                  <NodeRow label="Preprocess">
+                    <button className={`node-toggle ${node.data.preprocessVideo !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { preprocessVideo: node.data.preprocessVideo === false })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Type">
+                    <select value={node.data.preprocessType || "depth"} onChange={(event) => onUpdate(node.id, { preprocessType: event.target.value })}>
+                      <option value="depth">Depth</option>
+                      <option value="pose">Pose</option>
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Match Frames">
+                    <button className={`node-toggle ${node.data.matchInputNumFrames !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { matchInputNumFrames: node.data.matchInputNumFrames === false })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  {node.data.matchInputNumFrames === false && (
+                    <NodeRow label="Frames">
+                      <input type="number" min="1" max="241" value={node.data.numFrames || 81} onChange={(event) => onUpdate(node.id, { numFrames: event.target.value })} />
+                    </NodeRow>
+                  )}
+                  <NodeRow label="Match FPS">
+                    <button className={`node-toggle ${node.data.matchInputFps !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { matchInputFps: node.data.matchInputFps === false })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  {node.data.matchInputFps === false && (
+                    <NodeRow label="FPS">
+                      <input type="number" min="1" max="60" value={node.data.fps || 16} onChange={(event) => onUpdate(node.id, { fps: event.target.value })} />
+                    </NodeRow>
+                  )}
+                  <NodeRow label="Steps">
+                    <input type="number" min="1" max="60" value={node.data.numInferenceSteps || 27} onChange={(event) => onUpdate(node.id, { numInferenceSteps: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Guidance">
+                    <input type="number" min="0" max="20" step="0.1" value={node.data.guidanceScale || 6} onChange={(event) => onUpdate(node.id, { guidanceScale: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Shift">
+                    <input type="number" min="0" max="20" step="0.1" value={node.data.shift || 5} onChange={(event) => onUpdate(node.id, { shift: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Seed">
+                    <input value={node.data.seed || ""} onChange={(event) => onUpdate(node.id, { seed: event.target.value })} placeholder="Random" />
+                  </NodeRow>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <NodeRow label="Model">
+                <select value={utilityImageModel} onChange={(event) => onUpdate(node.id, { utilityImageModel: event.target.value, resultUrl: "", resultItems: [], resultType: "image", error: "" })}>
+                  <option>{utilityImageModelNames.dwpose}</option>
+                  <option>{utilityImageModelNames.depthAnything}</option>
+                  <option>{utilityImageModelNames.patina}</option>
+                  <option>{utilityImageModelNames.sam3Image}</option>
+                </select>
+              </NodeRow>
+              {isSam3Image && (
+                <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                  <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
+                </NodeRow>
+              )}
+              <NodeRow label="Image" inputPort={settingsOpen ? imagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                <button className={incoming.imageIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.imageIn, "Add image")}</button>
+              </NodeRow>
+              {isPatina ? (
+                <>
+                  {patinaMapOptions.map((option) => (
+                    <NodeRow key={option.id} label={option.label}>
+                      <button className={`node-toggle ${patinaMapsForData(node.data).includes(option.id) ? "enabled" : ""}`} onClick={() => togglePatinaMap(option.id)}>
+                        <span />
+                      </button>
+                    </NodeRow>
+                  ))}
+                  <NodeRow label="Format">
+                    <select value={node.data.patinaOutputFormat || "png"} onChange={(event) => onUpdate(node.id, { patinaOutputFormat: event.target.value })}>
+                      <option value="png">PNG</option>
+                      <option value="jpeg">JPEG</option>
+                      <option value="webp">WebP</option>
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Seed">
+                    <input value={node.data.patinaSeed || ""} onChange={(event) => onUpdate(node.id, { patinaSeed: event.target.value })} placeholder="Random" />
+                  </NodeRow>
+                </>
+              ) : isDepthAnything || isSam3Image ? null : (
+                <NodeRow label="Draw Mode">
+                  <select value={node.data.dwposeDrawMode || "body-pose"} onChange={(event) => onUpdate(node.id, { dwposeDrawMode: event.target.value })}>
+                    <option value="body-pose">Body Pose</option>
+                    <option value="full-pose">Full Pose</option>
+                    <option value="face-pose">Face Pose</option>
+                    <option value="hand-pose">Hand Pose</option>
+                    <option value="face-hand-mask">Face + Hand Mask</option>
+                    <option value="face-mask">Face Mask</option>
+                    <option value="hand-mask">Hand Mask</option>
+                  </select>
+                </NodeRow>
+              )}
+            </>
+          )}
+        </details>
+      </div>
+    );
+  }
+
   if (node.type === "imageModel") {
     const promptValue = connectedText(incoming.promptIn) || node.data.prompt;
     const promptConnected = Boolean(connectedText(incoming.promptIn));
@@ -2799,7 +3216,6 @@ function NodeBody({
           <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
             <option>{videoModelNames.seedance}</option>
             <option>{videoModelNames.seedanceFast}</option>
-            <option>{videoModelNames.wanFunControl}</option>
             <option>{videoModelNames.aurora}</option>
             {sam3SegmentationModelsEnabled && <option>{videoModelNames.sam3Video}</option>}
           </select>
@@ -3038,6 +3454,16 @@ function getNodeConfig(type) {
       input: [],
       output: [{ id: "transferOut", label: "TRANSFER.png", color: portColors.transfer }]
     },
+    utility: {
+      icon: Wrench,
+      input: [
+        { id: "imageIn", label: "Image", color: portColors.image },
+        { id: "promptIn", label: "Prompt", color: portColors.prompt },
+        { id: "referenceImageIn", label: "Reference Image", color: portColors.image },
+        { id: "referenceVideoIn", label: "Control Video", color: portColors.video }
+      ],
+      output: [{ id: "utilityOut", label: "Output", color: portColors.image }]
+    },
     video: {
       icon: Video,
       input: [],
@@ -3106,6 +3532,32 @@ function createDefaultNodeData(type, label, count) {
       hiddenPrompt: transferPromptSuffix
     };
   }
+  if (type === "utility") {
+    return {
+      title,
+      utilityMode: "video",
+      model: videoModelNames.wanFunControl,
+      utilityImageModel: utilityImageModelNames.dwpose,
+      utilityVideoModel: utilityVideoModelNames.wanFunControl,
+      dwposeDrawMode: "body-pose",
+      patinaMaps: patinaMapOptions.map((option) => option.id),
+      patinaOutputFormat: "png",
+      patinaSeed: "",
+      sam3VideoDetectionThreshold: 0.5,
+      prompt: "",
+      batchCount: "1",
+      preprocessVideo: true,
+      preprocessType: "depth",
+      matchInputNumFrames: true,
+      numFrames: 81,
+      matchInputFps: true,
+      fps: 16,
+      numInferenceSteps: 27,
+      guidanceScale: 6,
+      shift: 5,
+      seed: ""
+    };
+  }
   if (type === "style") return { title, stylePreset: "None" };
   if (type === "imageModel") {
     return {
@@ -3149,6 +3601,82 @@ function isSam3VideoModel(model) {
   if (!sam3SegmentationModelsEnabled) return false;
   const normalized = String(model || "").toLowerCase();
   return normalized.includes("sam") && normalized.includes("video");
+}
+
+function isDepthAnythingModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("depth") || normalized.includes("anything");
+}
+
+function isPatinaModel(model) {
+  return String(model || "").toLowerCase().includes("patina");
+}
+
+function isUtilitySam3ImageModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("sam") && normalized.includes("image");
+}
+
+function isUtilitySam3VideoModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("sam") && normalized.includes("video");
+}
+
+function utilityMode(node) {
+  return node?.data?.utilityMode === "image" ? "image" : "video";
+}
+
+function utilityOutputType(node) {
+  return utilityMode(node);
+}
+
+function utilityResultType(node) {
+  return node?.data?.resultType || utilityMode(node);
+}
+
+function utilityInputPortIds(mode, imageModel = utilityImageModelNames.dwpose, videoModel = utilityVideoModelNames.wanFunControl) {
+  if (mode === "image") {
+    return isUtilitySam3ImageModel(imageModel) ? ["promptIn", "imageIn"] : ["imageIn"];
+  }
+
+  return isUtilitySam3VideoModel(videoModel) ? ["promptIn", "referenceVideoIn"] : ["promptIn", "referenceImageIn", "referenceVideoIn"];
+}
+
+function normalizedUtilityImageModelName(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("image")) return utilityImageModelNames.sam3Image;
+  if (normalized.includes("depth") || normalized.includes("anything")) return utilityImageModelNames.depthAnything;
+  if (normalized.includes("patina")) return utilityImageModelNames.patina;
+  return utilityImageModelNames.dwpose;
+}
+
+function patinaMapsForData(data = {}) {
+  const selectedMaps = Array.isArray(data.patinaMaps) ? data.patinaMaps : patinaMapOptions.map((option) => option.id);
+  const validMaps = selectedMaps.filter((mapId) => patinaMapOptions.some((option) => option.id === mapId));
+  return validMaps.length ? [...new Set(validMaps)] : patinaMapOptions.map((option) => option.id);
+}
+
+function visiblePortIdsForNode(node) {
+  if (node?.type === "utility") {
+    return [...utilityInputPortIds(node.data?.utilityMode, node.data?.utilityImageModel, node.data?.utilityVideoModel), "utilityOut"];
+  }
+
+  return [...inputPortIdsForNode(node), ...outputPortIdsForNode(node)];
+}
+
+function inputPortIdsForNode(node) {
+  return (getNodeConfig(node?.type)?.input || []).map((port) => port.id);
+}
+
+function outputPortIdsForNode(node) {
+  return (getNodeConfig(node?.type)?.output || []).map((port) => port.id);
+}
+
+function estimatedNodeWidth(type) {
+  if (type === "imageModel" || type === "videoModel" || type === "utility") return 370;
+  if (type === "camera") return 360;
+  if (type === "transfer" || type === "preview") return 335;
+  return 310;
 }
 
 function configTitleFallback(type) {
@@ -3216,7 +3744,7 @@ function connectedText(items = []) {
   return items
     .map(({ source }) => {
       if (source.type === "text") return source.data.resultText || source.data.text;
-      if (source.type === "imageModel" || source.type === "videoModel") return source.data.resultText;
+      if (source.type === "imageModel" || source.type === "videoModel" || source.type === "utility") return source.data.resultText;
       return source.data.title;
     })
     .filter(Boolean)
@@ -3259,7 +3787,7 @@ function connectedMediaInputItems(items = [], mediaType) {
 }
 
 async function runTextNodeProcessing({ node, incoming, projectId, projectName }) {
-  const response = await fetch("/api/node/process-text", {
+  const { response, data } = await fetchJsonApi("/api/node/process-text", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -3272,8 +3800,7 @@ async function runTextNodeProcessing({ node, incoming, projectId, projectName })
       nodeId: node.id,
       nodeTitle: node.data.title
     })
-  });
-  const data = await response.json();
+  }, "Text processing");
   if (!response.ok) throw new Error(data.error || "Text processing failed.");
 
   return {
@@ -3286,7 +3813,7 @@ async function runCameraQwenEdit({ node, incoming, projectId, projectName }) {
   const imageUrl = connectedAssetUrls(incoming.imageIn).at(-1);
   if (!imageUrl) throw new Error("Connect an image to the Camera node.");
 
-  const response = await fetch("/api/node/qwen-camera-edit", {
+  const { response, data } = await fetchJsonApi("/api/node/qwen-camera-edit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -3303,8 +3830,7 @@ async function runCameraQwenEdit({ node, incoming, projectId, projectName }) {
       nodeId: node.id,
       nodeTitle: node.data.title
     })
-  });
-  const data = await response.json();
+  }, "Camera edit");
   if (!response.ok) throw new Error(data.error || "Camera edit failed.");
 
   return {
@@ -3317,8 +3843,106 @@ async function runCameraQwenEdit({ node, incoming, projectId, projectName }) {
   };
 }
 
+async function runUtilityImageGeneration({ node, prompt, incoming, projectId, projectName }) {
+  const imageUrl = connectedAssetUrls(incoming.imageIn).at(-1);
+  if (!imageUrl) throw new Error("Connect an image to the Utility node.");
+
+  const { response, data } = await fetchJsonApi("/api/node/utility-image", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      model: normalizedUtilityImageModelName(node.data.utilityImageModel),
+      imageUrls: [imageUrl],
+      dwposeDrawMode: node.data.dwposeDrawMode || "body-pose",
+      patinaMaps: patinaMapsForData(node.data),
+      patinaOutputFormat: node.data.patinaOutputFormat || "png",
+      patinaSeed: node.data.patinaSeed || "",
+      projectId,
+      projectName,
+      nodeId: node.id,
+      nodeTitle: node.data.title
+    })
+  }, "Utility image");
+  if (!response.ok) throw new Error(data.error || "Utility image failed.");
+
+  const images = Array.isArray(data.images) ? data.images : data.image ? [data.image] : [];
+  if (!images.length) throw new Error(`${data.modelName || "Utility image"} returned no images.`);
+  return images.map((image, index) => ({
+    url: image.localUrl,
+    type: "image",
+    label: image.label || `${data.modelName || "Image"} ${index + 1}`,
+    text: data.text || "",
+    seed: data.seed,
+    cost: data.cost
+  }));
+}
+
+async function fetchJsonApi(path, options, label) {
+  let response;
+  try {
+    response = await fetch(path, options);
+  } catch (error) {
+    throw new Error(`${label} failed. Could not reach the local app server. Restart npm run dev and try again. ${error.message || ""}`.trim());
+  }
+
+  try {
+    return {
+      response,
+      data: await readJsonResponse(response, label)
+    };
+  } catch (error) {
+    if (!error.htmlApiResponse || !canRetryLocalApi(path)) throw error;
+
+    try {
+      const healthResponse = await fetch("http://127.0.0.1:3333/api/health");
+      const healthData = await readJsonResponse(healthResponse, "Server health");
+      const routeKey = path.includes("utility-image") ? "utilityImage" : path.includes("utility-video") ? "utilityVideo" : "";
+      if (!healthResponse.ok || (routeKey && !healthData?.routes?.[routeKey])) {
+        throw new Error("The backend is running, but it does not have the updated Utility routes.");
+      }
+
+      const retryResponse = await fetch(`http://127.0.0.1:3333${path}`, options);
+      return {
+        response: retryResponse,
+        data: await readJsonResponse(retryResponse, label)
+      };
+    } catch (retryError) {
+      throw new Error(
+        `${label} failed. ${retryError.message || "Could not reach the updated backend route."} Restart npm run dev so the updated server is active.`
+      );
+    }
+  }
+}
+
+async function readJsonResponse(response, label) {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    const looksLikeHtml = text.trim().startsWith("<");
+    const error = new Error(
+      `${label} failed. ${
+        looksLikeHtml
+          ? "The server returned an HTML page instead of API data. Restart npm run dev so the updated backend route is active."
+          : "The server returned a response that was not valid JSON."
+      }`
+    );
+    error.htmlApiResponse = looksLikeHtml;
+    throw error;
+  }
+}
+
+function canRetryLocalApi(path) {
+  if (!String(path || "").startsWith("/api/")) return false;
+  if (typeof window === "undefined") return false;
+  const hostname = window.location.hostname;
+  const isLocalhost = hostname === "127.0.0.1" || hostname === "localhost";
+  return isLocalhost && window.location.port !== "3333";
+}
+
 async function runImageModelGeneration({ node, prompt, imagePromptItems, projectId, projectName, index }) {
-  const response = await fetch("/api/node/generate-image", {
+  const { response, data } = await fetchJsonApi("/api/node/generate-image", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -3333,8 +3957,7 @@ async function runImageModelGeneration({ node, prompt, imagePromptItems, project
       nodeId: node.id,
       nodeTitle: node.data.title
     })
-  });
-  const data = await response.json();
+  }, "Image generation");
   if (!response.ok) throw new Error(`Run ${index + 1}: ${data.error || "Image generation failed."}`);
 
   return {
@@ -3347,7 +3970,7 @@ async function runImageModelGeneration({ node, prompt, imagePromptItems, project
 }
 
 async function runVideoModelGeneration({ node, prompt, incoming, projectId, projectName, index }) {
-  const response = await fetch("/api/node/generate-video", {
+  const { response, data } = await fetchJsonApi("/api/node/generate-video", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -3379,14 +4002,54 @@ async function runVideoModelGeneration({ node, prompt, incoming, projectId, proj
       nodeId: node.id,
       nodeTitle: node.data.title
     })
-  });
-  const data = await response.json();
+  }, "Video generation");
   if (!response.ok) throw new Error(`Run ${index + 1}: ${data.error || "Video generation failed."}`);
 
   return {
     url: data.video.localUrl,
     type: "video",
     label: `Video ${index + 1}`,
+    seed: data.seed,
+    cost: data.cost
+  };
+}
+
+async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, projectName, index }) {
+  const { response, data } = await fetchJsonApi("/api/node/utility-video", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt,
+      model: node.data.utilityVideoModel || utilityVideoModelNames.wanFunControl,
+      referenceImageUrls: connectedAssetUrls(incoming.referenceImageIn),
+      referenceVideoUrls: connectedAssetUrls(incoming.referenceVideoIn),
+      wanFunControl: {
+        preprocessVideo: node.data.preprocessVideo !== false,
+        preprocessType: node.data.preprocessType || "depth",
+        matchInputNumFrames: node.data.matchInputNumFrames !== false,
+        numFrames: node.data.numFrames || 81,
+        matchInputFps: node.data.matchInputFps !== false,
+        fps: node.data.fps || 16,
+        numInferenceSteps: node.data.numInferenceSteps || 27,
+        guidanceScale: node.data.guidanceScale || 6,
+        shift: node.data.shift || 5,
+        seed: node.data.seed || ""
+      },
+      sam3Video: {
+        detectionThreshold: node.data.sam3VideoDetectionThreshold ?? 0.5
+      },
+      projectId,
+      projectName,
+      nodeId: node.id,
+      nodeTitle: node.data.title
+    })
+  }, "Utility video");
+  if (!response.ok) throw new Error(`Run ${index + 1}: ${data.error || "Utility video failed."}`);
+
+  return {
+    url: data.video.localUrl,
+    type: "video",
+    label: data.modelName || `Video ${index + 1}`,
     seed: data.seed,
     cost: data.cost
   };
@@ -3421,12 +4084,13 @@ function connectedPreviewSource(items = []) {
 
   return {
     url: source.data.resultUrl,
-    type: previewMediaType(source),
+    type: previewMediaType(source, edge),
     label: source.type === "camera" && edge.from.port === "imageOut" ? "Camera image" : sourceLabel(source)
   };
 }
 
-function previewMediaType(source) {
+function previewMediaType(source, edge) {
+  if (source.type === "utility") return utilityResultType(source);
   if (source.type === "video" || source.type === "videoModel") return "video";
   if (/\.(mp4|mov|webm)$/i.test(source.data.resultUrl || "")) return "video";
   return "image";
@@ -3506,6 +4170,7 @@ function sourceLabel(source) {
   if (source.type === "camera") return cameraLabel(source);
   if (source.type === "transfer" && source.data.resultUrl) return "TRANSFER.png";
   if (source.type === "style") return (source.data.stylePreset || "None") === "None" ? "Style" : source.data.stylePreset;
+  if (source.type === "utility" && source.data.resultUrl) return utilityResultType(source) === "video" ? "Utility video" : "Utility image";
   if (source.data.resultUrl) return source.data.resultUrl.split("/").pop();
   if (source.data.fileName) return source.data.fileName;
   return source.data.title || source.type;
@@ -3617,7 +4282,7 @@ function finiteNumber(value, fallback) {
 }
 
 function isRunnableNode(node) {
-  return ["text", "imageModel", "videoModel"].includes(node.type) || (node.type === "camera" && node.data.qwenCameraOpen);
+  return ["text", "imageModel", "videoModel", "utility"].includes(node.type) || (node.type === "camera" && node.data.qwenCameraOpen);
 }
 
 function buildSelectedRunnableDependencies(nodes, edges) {
@@ -3636,6 +4301,7 @@ function nodeRunPriority(node) {
   if (node?.type === "text") return 0;
   if (node?.type === "camera") return 1;
   if (node?.type === "imageModel") return 2;
+  if (node?.type === "utility") return 3;
   if (node?.type === "videoModel") return 3;
   return 3;
 }
@@ -3644,6 +4310,7 @@ function runStageLabel(type) {
   if (type === "text") return "text";
   if (type === "camera") return "camera";
   if (type === "imageModel") return "image";
+  if (type === "utility") return "utility";
   if (type === "videoModel") return "video";
   return "selected";
 }
@@ -3687,6 +4354,25 @@ function cloneNode(node) {
   return {
     ...node,
     data: JSON.parse(JSON.stringify(node.data || {}))
+  };
+}
+
+function createNodeId(type, suffix = "") {
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  return [type, Date.now(), suffix, randomPart].filter(Boolean).join("-");
+}
+
+function resetCopiedNodeRuntime(data = {}) {
+  if (!["running", "uploading"].includes(data.status)) return data;
+
+  return {
+    ...data,
+    status: "ready",
+    error: "",
+    resultUrl: "",
+    resultItems: [],
+    selectedResultIndex: 0,
+    resultText: ""
   };
 }
 
@@ -3749,7 +4435,7 @@ function normalizeEditorGraph(nodes = [], edges = [], groups = []) {
       return;
     }
 
-    normalizedNodes.push(clearStaleRunningState(node));
+    normalizedNodes.push(normalizeCurrentNode(node));
   });
 
   const nodeMap = new Map(normalizedNodes.map((node) => [node.id, node]));
@@ -3796,6 +4482,59 @@ function normalizeGroups(groups = [], nodeMap = new Map()) {
       };
     })
     .filter((group) => group.id && group.width && group.height);
+}
+
+function normalizeCurrentNode(node) {
+  const nextNode = clearStaleRunningState(node);
+  const data = nextNode.data || {};
+
+  if (nextNode.type === "videoModel" && isWanFunControlModel(data.model)) {
+    return {
+      ...nextNode,
+      type: "utility",
+      data: normalizeUtilityData({
+        ...data,
+        title: data.title === "Video Model" ? "Utility" : data.title,
+        utilityMode: "video"
+      })
+    };
+  }
+
+  if (nextNode.type === "utility") {
+    return {
+      ...nextNode,
+      data: normalizeUtilityData(data)
+    };
+  }
+
+  return nextNode;
+}
+
+function normalizeUtilityData(data = {}) {
+  return {
+    ...data,
+    title: data.title || "Utility",
+    utilityMode: data.utilityMode === "image" ? "image" : "video",
+    model: videoModelNames.wanFunControl,
+    utilityImageModel: normalizedUtilityImageModelName(data.utilityImageModel),
+    utilityVideoModel: data.utilityVideoModel || utilityVideoModelNames.wanFunControl,
+    dwposeDrawMode: data.dwposeDrawMode || "body-pose",
+    patinaMaps: patinaMapsForData(data),
+    patinaOutputFormat: data.patinaOutputFormat || "png",
+    patinaSeed: data.patinaSeed || "",
+    sam3VideoDetectionThreshold: data.sam3VideoDetectionThreshold ?? 0.5,
+    batchCount: data.batchCount || "1",
+    preprocessVideo: data.preprocessVideo !== false,
+    preprocessType: data.preprocessType || "depth",
+    matchInputNumFrames: data.matchInputNumFrames !== false,
+    numFrames: data.numFrames || 81,
+    matchInputFps: data.matchInputFps !== false,
+    fps: data.fps || 16,
+    numInferenceSteps: data.numInferenceSteps || 27,
+    guidanceScale: data.guidanceScale || 6,
+    shift: data.shift || 5,
+    seed: data.seed || ""
+  };
 }
 
 function isLegacyDirectionNode(node) {
@@ -3909,6 +4648,10 @@ function normalizeEdgeForCurrentGraph(edge, nodeMap) {
   const nextEdge = cloneEdge(edge);
   const target = nodeMap.get(edge.to.nodeId);
 
+  if (target?.type === "utility" && !utilityInputPortIds(target.data?.utilityMode, target.data?.utilityImageModel, target.data?.utilityVideoModel).includes(nextEdge.to.port)) {
+    return null;
+  }
+
   if (source.type === "transfer") {
     nextEdge.from.port = "transferOut";
     if (nextEdge.to.port === "imagePromptIn") nextEdge.to.port = "transferIn";
@@ -3930,6 +4673,11 @@ function normalizeEdgeForCurrentGraph(edge, nodeMap) {
     nextEdge.color = portColors.style;
   }
 
+  if (source.type === "utility") {
+    nextEdge.from.port = "utilityOut";
+    nextEdge.color = utilityOutputType(source) === "video" ? portColors.video : portColors.image;
+  }
+
   return nextEdge;
 }
 
@@ -3940,6 +4688,7 @@ function isCameraImageEdge(edge, target) {
   if (target?.type === "camera" && edge.to.port === "imageIn") return true;
   if (target?.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(edge.to.port)) return true;
   if (target?.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(edge.to.port)) return true;
+  if (target?.type === "utility" && ["imageIn", "referenceImageIn"].includes(edge.to.port)) return true;
   return false;
 }
 
