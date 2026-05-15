@@ -39,6 +39,8 @@ const falTextModel = process.env.FAL_TEXT_MODEL || "openai/gpt-4o";
 const falVisionTextModel = process.env.FAL_VISION_TEXT_MODEL || falTextModel;
 const falVideoTextModel = process.env.FAL_VIDEO_TEXT_MODEL || "google/gemini-2.5-flash";
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
+const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
+const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
 
 const app = express();
 
@@ -631,6 +633,10 @@ app.post("/api/node/utility-image", async (req, res) => {
       return runPatinaUtilityImage(req, res, { imageUrl, selectedModel });
     }
 
+    if (selectedModel.provider === "fal-birefnet-image") {
+      return runBirefnetUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
     if (selectedModel.provider === "fal-sam3-image") {
       const prompt = String(req.body.prompt || "").trim();
       if (!prompt) {
@@ -905,25 +911,141 @@ async function runPatinaUtilityImage(req, res, { imageUrl, selectedModel }) {
   });
 }
 
+async function runBirefnetUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const options = req.body.birefnet || {};
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    model: normalizeChoice(options.model, birefnetModelOptions, "General Use (Light)"),
+    operating_resolution: normalizeChoice(options.operatingResolution, birefnetResolutionOptions, "1024x1024"),
+    output_mask: Boolean(options.outputMask),
+    refine_foreground: options.refineForeground !== false,
+    output_format: normalizeChoice(options.outputFormat, ["webp", "png", "gif"], "png"),
+    mask_only: Boolean(options.maskOnly)
+  };
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImage = firstFalImageResult(result?.data);
+  const remoteMask = normalizeFalFile(result?.data?.mask_image);
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no BiRefNet image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "birefnet-image", remoteImage.content_type || remoteImage.mimeType);
+  const images = [
+    {
+      remoteImage,
+      output,
+      label: input.mask_only ? "BiRefNet Mask" : "BiRefNet Image"
+    }
+  ];
+
+  if (input.output_mask && remoteMask?.url && remoteMask.url !== remoteImage.url) {
+    const maskOutput = await downloadImage(remoteMask.url, "birefnet-mask", remoteMask.content_type || remoteMask.mimeType);
+    images.push({
+      remoteImage: remoteMask,
+      output: maskOutput,
+      label: "BiRefNet Mask"
+    });
+  }
+
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "BiRefNet v2 fal.ai image background removal request; local price estimate not configured"
+  });
+  const text = input.mask_only ? "BiRefNet segmentation mask." : "BiRefNet background removed image.";
+  const outputBytes = images.reduce((sum, item) => sum + item.output.bytes, 0);
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "BiRefNet image background removal",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: input.model,
+      operatingResolution: input.operating_resolution,
+      outputMask: input.output_mask,
+      refineForeground: input.refine_foreground,
+      outputFormat: input.output_format,
+      maskOnly: input.mask_only,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage,
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      label: images[0].label,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    },
+    images: images.map(({ remoteImage, output, label }) => ({
+      ...remoteImage,
+      label,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    }))
+  });
+}
+
 app.post("/api/node/utility-video", async (req, res) => {
   try {
     if (!process.env.FAL_KEY) {
       return res.status(400).json({ error: "Missing FAL_KEY in .env." });
     }
 
-    const prompt = String(req.body.prompt || "").trim();
-    if (!prompt) {
-      return res.status(400).json({ error: "Prompt is required." });
-    }
-
     const selectedVideoModel = resolveUtilityVideoModel(req.body.model);
+    const prompt = String(req.body.prompt || "").trim();
     const referenceImageUrls = Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [];
     const referenceVideoUrls = Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : [];
+    const maskVideoUrls = Array.isArray(req.body.maskVideoUrls) ? req.body.maskVideoUrls.filter(isLocalAssetUrl) : [];
+
+    if (!prompt && selectedVideoModel.requiresPrompt) {
+      return res.status(400).json({ error: `${selectedVideoModel.displayName} requires a prompt.` });
+    }
 
     if (selectedVideoModel.provider === "fal-sam3-video") {
       return runSam3VideoSegmentation(req, res, {
         prompt,
         referenceVideoUrls
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-void-video-inpainting") {
+      return runVoidVideoInpaintingUtility(req, res, {
+        prompt,
+        referenceVideoUrls,
+        maskVideoUrls,
+        selectedVideoModel
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-birefnet-video") {
+      return runBirefnetUtilityVideo(req, res, {
+        referenceVideoUrls,
+        selectedVideoModel
       });
     }
 
@@ -938,7 +1060,7 @@ app.post("/api/node/utility-video", async (req, res) => {
     return res.status(400).json({ error: "Unsupported Utility video model." });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: error.message || "Utility video failed." });
+    res.status(errorStatusCode(error)).json({ error: publicErrorMessage(error, "Utility video failed.") });
   }
 });
 
@@ -1398,6 +1520,194 @@ async function runWanFunControlVideo(req, res, { prompt, referenceImageUrls, ref
   });
 }
 
+async function runVoidVideoInpaintingUtility(req, res, { prompt, referenceVideoUrls, maskVideoUrls, selectedVideoModel }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "VOID Video Inpainting requires a connected source video." });
+  }
+
+  const options = req.body.voidVideoInpainting || {};
+  const endpoint = selectedVideoModel.id;
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    prompt,
+    mask_prompt: String(options.maskPrompt || "").trim(),
+    enable_pass2_refinement: Boolean(options.enablePass2Refinement),
+    negative_prompt: String(options.negativePrompt || ""),
+    num_inference_steps: clampInteger(options.numInferenceSteps, 1, 80, 30),
+    guidance_scale: clampNumber(options.guidanceScale, 0, 20, 1),
+    strength: clampNumber(options.strength, 0, 1, 1),
+    num_frames: clampInteger(options.numFrames, 69, 197, 85),
+    enable_safety_checker: options.enableSafetyChecker !== false
+  };
+  const seed = optionalInteger(options.seed);
+  const maskVideoUrl = firstLocalOutput(maskVideoUrls);
+  if (seed !== undefined) input.seed = seed;
+  if (maskVideoUrl) input.quad_mask_video_url = await uploadLocalOutputToFal(maskVideoUrl);
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no VOID video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "void-video-inpainting");
+  const cost = estimateFalVideoUtilityCost({
+    endpoint,
+    pricingBasis: "VOID video inpainting fal.ai request; local price estimate not configured"
+  });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "VOID video inpainting",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedVideoModel.displayName,
+      maskPrompt: input.mask_prompt,
+      maskVideoCount: maskVideoUrl ? 1 : 0,
+      enablePass2Refinement: input.enable_pass2_refinement,
+      numInferenceSteps: input.num_inference_steps,
+      guidanceScale: input.guidance_scale,
+      strength: input.strength,
+      numFrames: input.num_frames,
+      enableSafetyChecker: input.enable_safety_checker,
+      seed: result?.data?.seed ?? input.seed ?? null,
+      sourceVideoCount: 1
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
+    seed: result?.data?.seed ?? input.seed,
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
+async function runBirefnetUtilityVideo(req, res, { referenceVideoUrls, selectedVideoModel }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "BiRefNet Video requires a connected video." });
+  }
+
+  const endpoint = selectedVideoModel.id;
+  const options = req.body.birefnet || {};
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    model: normalizeChoice(options.model, birefnetModelOptions, "General Use (Light)"),
+    operating_resolution: normalizeChoice(options.operatingResolution, birefnetResolutionOptions, "1024x1024"),
+    output_mask: Boolean(options.outputMask),
+    refine_foreground: options.refineForeground !== false,
+    video_output_type: normalizeChoice(options.videoOutputType, ["X264 (.mp4)", "VP9 (.webm)", "PRORES4444 (.mov)", "GIF (.gif)"], "X264 (.mp4)"),
+    video_quality: normalizeChoice(options.videoQuality, ["low", "medium", "high", "maximum"], "high"),
+    video_write_mode: normalizeChoice(options.videoWriteMode, ["fast", "balanced", "small"], "balanced")
+  };
+  if (input.operating_resolution === "2304x2304" && input.model !== "General Use (Dynamic)") {
+    input.operating_resolution = "2048x2048";
+  }
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video) || findFalMediaFile(result?.data, "video/");
+  const remoteMaskVideo = normalizeFalFile(result?.data?.mask_video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no BiRefNet video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "birefnet-video");
+  const videos = [
+    {
+      remoteVideo,
+      output,
+      label: "BiRefNet RGB"
+    }
+  ];
+
+  if (input.output_mask && remoteMaskVideo?.url && remoteMaskVideo.url !== remoteVideo.url) {
+    const maskOutput = await downloadVideo(remoteMaskVideo.url, "birefnet-mask-video");
+    videos.push({
+      remoteVideo: remoteMaskVideo,
+      output: maskOutput,
+      label: "BiRefNet Mask"
+    });
+  }
+
+  const cost = estimateFalVideoUtilityCost({
+    endpoint,
+    pricingBasis: "BiRefNet v2 fal.ai video background removal request; local price estimate not configured"
+  });
+  const outputBytes = videos.reduce((sum, item) => sum + item.output.bytes, 0);
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "BiRefNet video background removal",
+    prompt: "BiRefNet video background removal.",
+    submittedPrompt: "BiRefNet video background removal.",
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: input.model,
+      operatingResolution: input.operating_resolution,
+      outputMask: input.output_mask,
+      refineForeground: input.refine_foreground,
+      videoOutputType: input.video_output_type,
+      videoQuality: input.video_quality,
+      videoWriteMode: input.video_write_mode,
+      sourceVideoCount: 1
+    },
+    cost,
+    remoteVideo,
+    remoteMaskVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
+    cost,
+    video: {
+      ...remoteVideo,
+      label: videos[0].label,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    },
+    videos: videos.map(({ remoteVideo, output, label }) => ({
+      ...remoteVideo,
+      label,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }))
+  });
+}
+
 app.post(
   "/api/generate",
   upload.fields([
@@ -1830,6 +2140,11 @@ function falFileMatchesMedia(file, mimePrefix) {
     return [".jpg", ".jpeg", ".png", ".webp"].some((extension) => fileName.includes(extension));
   }
 
+  if (mimePrefix === "video/") {
+    const fileName = String(file.file_name || file.fileName || file.name || file.url || "").toLowerCase();
+    return [".mp4", ".mov", ".webm", ".gif"].some((extension) => fileName.includes(extension));
+  }
+
   return false;
 }
 
@@ -2003,6 +2318,20 @@ function estimateFalImageUtilityCost({ endpoint, mediaType, pricingBasis }) {
     mediaType,
     pricingBasis,
     pricingSource: "fal-model-page-2026-05-13",
+    endpoint
+  };
+}
+
+function estimateFalVideoUtilityCost({ endpoint, pricingBasis }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: 1,
+    unit: "request",
+    mediaType: "video",
+    pricingBasis,
+    pricingSource: "fal-model-page-2026-05-15",
     endpoint
   };
 }
@@ -2385,6 +2714,14 @@ function resolveUtilityImageModel(model) {
     };
   }
 
+  if (normalized.includes("birefnet")) {
+    return {
+      provider: "fal-birefnet-image",
+      displayName: "BiRefNet Image",
+      id: "fal-ai/birefnet/v2"
+    };
+  }
+
   return {
     provider: "fal-dwpose",
     displayName: "DWPose",
@@ -2398,7 +2735,26 @@ function resolveUtilityVideoModel(model) {
     return {
       provider: "fal-sam3-video",
       displayName: "SAM 3 Video",
-      id: "fal-ai/sam-3/video"
+      id: "fal-ai/sam-3/video",
+      requiresPrompt: true
+    };
+  }
+
+  if (normalized.includes("birefnet")) {
+    return {
+      provider: "fal-birefnet-video",
+      displayName: "BiRefNet Video",
+      id: "fal-ai/birefnet/v2/video",
+      requiresPrompt: false
+    };
+  }
+
+  if (normalized.includes("void") || normalized.includes("inpaint")) {
+    return {
+      provider: "fal-void-video-inpainting",
+      displayName: "VOID Video Inpainting",
+      id: "fal-ai/void-video-inpainting",
+      requiresPrompt: true
     };
   }
 
@@ -2406,7 +2762,8 @@ function resolveUtilityVideoModel(model) {
     provider: "fal-wan-fun-control",
     displayName: "Wan Fun Control",
     id: "fal-ai/wan-fun-control",
-    speed: "wan"
+    speed: "wan",
+    requiresPrompt: true
   };
 }
 

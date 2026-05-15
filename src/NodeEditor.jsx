@@ -198,7 +198,8 @@ const utilityImageModelNames = {
   dwpose: "DWPose",
   depthAnything: "Depth Anything",
   patina: "Patina",
-  sam3Image: "SAM 3 Image"
+  sam3Image: "SAM 3 Image",
+  birefnetImage: "BiRefNet Image"
 };
 const patinaMapOptions = [
   { id: "basecolor", label: "Basecolor" },
@@ -209,7 +210,22 @@ const patinaMapOptions = [
 ];
 const utilityVideoModelNames = {
   wanFunControl: "Wan Fun Control",
-  sam3Video: "SAM 3 Video"
+  sam3Video: "SAM 3 Video",
+  voidVideoInpainting: "VOID Video Inpainting",
+  birefnetVideo: "BiRefNet Video"
+};
+const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
+const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
+const utilityModelDescriptions = {
+  [utilityImageModelNames.dwpose]: "Creates pose/control maps from a source image for character and body-guided generation.",
+  [utilityImageModelNames.depthAnything]: "Extracts a depth map from an image for depth-aware control and composition.",
+  [utilityImageModelNames.patina]: "Generates PBR texture maps such as basecolor, normal, roughness, metalness, and height.",
+  [utilityImageModelNames.sam3Image]: "Segments prompted objects in an image and returns the masked result.",
+  [utilityImageModelNames.birefnetImage]: "Removes an image background with BiRefNet and can optionally return the mask.",
+  [utilityVideoModelNames.wanFunControl]: "Uses a control video, optional reference image, and prompt to guide a new video.",
+  [utilityVideoModelNames.sam3Video]: "Segments prompted objects through a video and returns the masked result.",
+  [utilityVideoModelNames.voidVideoInpainting]: "Removes an object from a video and inpaints the affected background over time.",
+  [utilityVideoModelNames.birefnetVideo]: "Removes a video background with BiRefNet and can optionally return the mask video."
 };
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 
@@ -1271,7 +1287,7 @@ export default function NodeEditor({ active = true } = {}) {
         if (target.type === "preview" && to.port === "sourceIn") return "";
         if (target.type === "text" && to.port === "videoIn") return "";
         if (target.type === "videoModel" && to.port === "referenceVideoIn") return "";
-        if (target.type === "utility" && to.port === "referenceVideoIn") return "";
+        if (target.type === "utility" && ["referenceVideoIn", "maskVideoIn"].includes(to.port)) return "";
         return "Utility video output connects to video inputs";
       }
 
@@ -1295,7 +1311,7 @@ export default function NodeEditor({ active = true } = {}) {
         return "Image input accepts image outputs";
       }
 
-      if (to.port === "referenceVideoIn") {
+      if (["referenceVideoIn", "maskVideoIn"].includes(to.port)) {
         if (["video", "videoModel"].includes(source.type)) return "";
         return "Video input accepts video outputs";
       }
@@ -1572,7 +1588,9 @@ export default function NodeEditor({ active = true } = {}) {
     const isSingleRunSegmentation =
       (currentNode.type === "imageModel" && isSam3ImageModel(currentNode.data.model)) ||
       (currentNode.type === "videoModel" && isSam3VideoModel(currentNode.data.model)) ||
-      (currentNode.type === "utility" && utilityMode(currentNode) === "video" && isUtilitySam3VideoModel(currentNode.data.utilityVideoModel));
+      (currentNode.type === "utility" &&
+        utilityMode(currentNode) === "video" &&
+        (isUtilitySam3VideoModel(currentNode.data.utilityVideoModel) || isUtilityBirefnetVideoModel(currentNode.data.utilityVideoModel)));
     const batchCount = isSingleRunSegmentation ? 1 : nodeBatchCount(currentNode);
 
     try {
@@ -1641,7 +1659,9 @@ export default function NodeEditor({ active = true } = {}) {
           })
         );
         const settled = await Promise.allSettled(runs);
-        const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+        const successes = settled
+          .filter((item) => item.status === "fulfilled")
+          .flatMap((item) => (Array.isArray(item.value) ? item.value : [item.value]));
         const failures = settled.filter((item) => item.status === "rejected");
         if (!successes.length) throw new Error(failures[0]?.reason?.message || "Utility video failed.");
 
@@ -2830,11 +2850,16 @@ function NodeBody({
     const promptPort = config.input.find((port) => port.id === "promptIn");
     const referenceImagePort = config.input.find((port) => port.id === "referenceImageIn");
     const referenceVideoPort = config.input.find((port) => port.id === "referenceVideoIn");
+    const maskVideoPort = config.input.find((port) => port.id === "maskVideoIn");
     const utilityImageModel = normalizedUtilityImageModelName(node.data.utilityImageModel);
+    const utilityVideoModel = normalizedUtilityVideoModelName(node.data.utilityVideoModel);
     const isDepthAnything = isDepthAnythingModel(utilityImageModel);
     const isPatina = isPatinaModel(utilityImageModel);
     const isSam3Image = isUtilitySam3ImageModel(utilityImageModel);
-    const isSam3Video = isUtilitySam3VideoModel(node.data.utilityVideoModel);
+    const isBirefnetImage = isUtilityBirefnetImageModel(utilityImageModel);
+    const isSam3Video = isUtilitySam3VideoModel(utilityVideoModel);
+    const isVoidVideo = isUtilityVoidVideoModel(utilityVideoModel);
+    const isBirefnetVideo = isUtilityBirefnetVideoModel(utilityVideoModel);
     const utilityOutputPort = {
       ...config.output[0],
       label: isVideoMode ? "Video output" : "Image output",
@@ -2842,12 +2867,35 @@ function NodeBody({
     };
     const promptValue = connectedText(incoming.promptIn) || node.data.prompt || "";
     const promptConnected = Boolean(connectedText(incoming.promptIn));
-    const collapsedPorts = isVideoMode ? (isSam3Video ? [promptPort, referenceVideoPort] : [promptPort, referenceVideoPort, referenceImagePort]) : isSam3Image ? [promptPort, imagePort] : [imagePort];
+    const collapsedPorts = isVideoMode
+      ? utilityInputPortIds("video", utilityImageModel, utilityVideoModel)
+          .map((portId) => config.input.find((port) => port.id === portId))
+          .filter(Boolean)
+      : utilityInputPortIds("image", utilityImageModel, utilityVideoModel)
+          .map((portId) => config.input.find((port) => port.id === portId))
+          .filter(Boolean);
     const resultType = node.data.resultType || mode;
     const canRun = isVideoMode
-      ? Boolean(incoming.referenceVideoIn?.length) && Boolean(promptValue.trim())
+      ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || Boolean(promptValue.trim()))
       : Boolean(incoming.imageIn?.length) && (!isSam3Image || Boolean(promptValue.trim()));
-    const utilityRunLabel = isVideoMode ? (isSam3Video ? "Run SAM 3 Video" : "Run Wan Fun Control") : isSam3Image ? "Run SAM 3 Image" : isPatina ? "Run Patina" : isDepthAnything ? "Run Depth Map" : "Run DWPose";
+    const utilityRunLabel = isVideoMode
+      ? isSam3Video
+        ? "Run SAM 3 Video"
+        : isVoidVideo
+          ? "Run VOID"
+          : isBirefnetVideo
+            ? "Run BiRefNet Video"
+            : "Run Wan Fun Control"
+      : isSam3Image
+        ? "Run SAM 3 Image"
+        : isBirefnetImage
+          ? "Run BiRefNet Image"
+          : isPatina
+            ? "Run Patina"
+            : isDepthAnything
+              ? "Run Depth Map"
+              : "Run DWPose";
+    const utilityDescription = utilityModelDescription(isVideoMode ? utilityVideoModel : utilityImageModel);
 
     function setMode(nextMode) {
       if (mode === nextMode) return;
@@ -2914,15 +2962,19 @@ function NodeBody({
           {isVideoMode ? (
             <>
               <NodeRow label="Model">
-                <select value={node.data.utilityVideoModel || utilityVideoModelNames.wanFunControl} onChange={(event) => onUpdate(node.id, { utilityVideoModel: event.target.value, resultUrl: "", resultItems: [], resultType: "video", error: "" })}>
+                <select value={utilityVideoModel} onChange={(event) => onUpdate(node.id, { utilityVideoModel: event.target.value, resultUrl: "", resultItems: [], resultType: "video", error: "" })}>
                   <option>{utilityVideoModelNames.wanFunControl}</option>
+                  <option>{utilityVideoModelNames.voidVideoInpainting}</option>
+                  <option>{utilityVideoModelNames.birefnetVideo}</option>
                   <option>{utilityVideoModelNames.sam3Video}</option>
                 </select>
               </NodeRow>
-              <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
-                <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
-              </NodeRow>
-              {!isSam3Video && (
+              {!isBirefnetVideo && (
+                <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                  <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
+                </NodeRow>
+              )}
+              {!isSam3Video && !isBirefnetVideo && (
                 <NodeRow label="Generations">
                   <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
                     {batchOptions.map((option) => (
@@ -2933,13 +2985,100 @@ function NodeBody({
                   </select>
                 </NodeRow>
               )}
-              <NodeRow label={isSam3Video ? "Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <NodeRow label={isSam3Video || isBirefnetVideo ? "Video" : isVoidVideo ? "Source Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                 <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add video")}</button>
               </NodeRow>
               {isSam3Video ? (
                 <NodeRow label="Threshold">
                   <input type="number" min="0" max="1" step="0.05" value={node.data.sam3VideoDetectionThreshold ?? 0.5} onChange={(event) => onUpdate(node.id, { sam3VideoDetectionThreshold: event.target.value })} />
                 </NodeRow>
+              ) : isVoidVideo ? (
+                <>
+                  <NodeRow label="Mask Video" inputPort={settingsOpen ? maskVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+                    <button className={incoming.maskVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.maskVideoIn, "Optional mask")}</button>
+                  </NodeRow>
+                  <NodeRow label="Mask Prompt">
+                    <input value={node.data.voidMaskPrompt || ""} onChange={(event) => onUpdate(node.id, { voidMaskPrompt: event.target.value })} placeholder="Object to remove" />
+                  </NodeRow>
+                  <NodeRow label="Pass 2">
+                    <button className={`node-toggle ${node.data.voidPass2Refinement ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { voidPass2Refinement: !node.data.voidPass2Refinement })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Negative">
+                    <textarea value={node.data.voidNegativePrompt || ""} onChange={(event) => onUpdate(node.id, { voidNegativePrompt: event.target.value })} placeholder="Optional negative prompt" />
+                  </NodeRow>
+                  <NodeRow label="Steps">
+                    <input type="number" min="1" max="80" value={node.data.voidNumInferenceSteps || 30} onChange={(event) => onUpdate(node.id, { voidNumInferenceSteps: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Guidance">
+                    <input type="number" min="0" max="20" step="0.1" value={node.data.voidGuidanceScale || 1} onChange={(event) => onUpdate(node.id, { voidGuidanceScale: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Strength">
+                    <input type="number" min="0" max="1" step="0.05" value={node.data.voidStrength || 1} onChange={(event) => onUpdate(node.id, { voidStrength: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Frames">
+                    <input type="number" min="69" max="197" step="8" value={node.data.voidNumFrames || 85} onChange={(event) => onUpdate(node.id, { voidNumFrames: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Safety">
+                    <button className={`node-toggle ${node.data.voidEnableSafetyChecker !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { voidEnableSafetyChecker: node.data.voidEnableSafetyChecker === false })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Seed">
+                    <input value={node.data.voidSeed || ""} onChange={(event) => onUpdate(node.id, { voidSeed: event.target.value })} placeholder="Random" />
+                  </NodeRow>
+                </>
+              ) : isBirefnetVideo ? (
+                <>
+                  <NodeRow label="BiRefNet">
+                    <select value={node.data.birefnetModel || "General Use (Light)"} onChange={(event) => onUpdate(node.id, { birefnetModel: event.target.value })}>
+                      {birefnetModelOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Resolution">
+                    <select value={node.data.birefnetOperatingResolution || "1024x1024"} onChange={(event) => onUpdate(node.id, { birefnetOperatingResolution: event.target.value })}>
+                      {birefnetResolutionOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Output Mask">
+                    <button className={`node-toggle ${node.data.birefnetOutputMask ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { birefnetOutputMask: !node.data.birefnetOutputMask })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Refine">
+                    <button className={`node-toggle ${node.data.birefnetRefineForeground !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { birefnetRefineForeground: node.data.birefnetRefineForeground === false })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Output Type">
+                    <select value={node.data.birefnetVideoOutputType || "X264 (.mp4)"} onChange={(event) => onUpdate(node.id, { birefnetVideoOutputType: event.target.value })}>
+                      <option>X264 (.mp4)</option>
+                      <option>VP9 (.webm)</option>
+                      <option>PRORES4444 (.mov)</option>
+                      <option>GIF (.gif)</option>
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Quality">
+                    <select value={node.data.birefnetVideoQuality || "high"} onChange={(event) => onUpdate(node.id, { birefnetVideoQuality: event.target.value })}>
+                      <option>low</option>
+                      <option>medium</option>
+                      <option>high</option>
+                      <option>maximum</option>
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Write Mode">
+                    <select value={node.data.birefnetVideoWriteMode || "balanced"} onChange={(event) => onUpdate(node.id, { birefnetVideoWriteMode: event.target.value })}>
+                      <option>fast</option>
+                      <option>balanced</option>
+                      <option>small</option>
+                    </select>
+                  </NodeRow>
+                </>
               ) : (
                 <>
                   <NodeRow label="Reference Image" inputPort={settingsOpen ? referenceImagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -2998,6 +3137,7 @@ function NodeBody({
                   <option>{utilityImageModelNames.dwpose}</option>
                   <option>{utilityImageModelNames.depthAnything}</option>
                   <option>{utilityImageModelNames.patina}</option>
+                  <option>{utilityImageModelNames.birefnetImage}</option>
                   <option>{utilityImageModelNames.sam3Image}</option>
                 </select>
               </NodeRow>
@@ -3029,6 +3169,47 @@ function NodeBody({
                     <input value={node.data.patinaSeed || ""} onChange={(event) => onUpdate(node.id, { patinaSeed: event.target.value })} placeholder="Random" />
                   </NodeRow>
                 </>
+              ) : isBirefnetImage ? (
+                <>
+                  <NodeRow label="BiRefNet">
+                    <select value={node.data.birefnetModel || "General Use (Light)"} onChange={(event) => onUpdate(node.id, { birefnetModel: event.target.value })}>
+                      {birefnetModelOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Resolution">
+                    <select value={node.data.birefnetOperatingResolution || "1024x1024"} onChange={(event) => onUpdate(node.id, { birefnetOperatingResolution: event.target.value })}>
+                      {birefnetResolutionOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Output Mask">
+                    <button className={`node-toggle ${node.data.birefnetOutputMask ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { birefnetOutputMask: !node.data.birefnetOutputMask })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Mask Only">
+                    <button className={`node-toggle ${node.data.birefnetMaskOnly ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { birefnetMaskOnly: !node.data.birefnetMaskOnly })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  {!node.data.birefnetMaskOnly && (
+                    <NodeRow label="Refine">
+                      <button className={`node-toggle ${node.data.birefnetRefineForeground !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { birefnetRefineForeground: node.data.birefnetRefineForeground === false })}>
+                        <span />
+                      </button>
+                    </NodeRow>
+                  )}
+                  <NodeRow label="Format">
+                    <select value={node.data.birefnetOutputFormat || "png"} onChange={(event) => onUpdate(node.id, { birefnetOutputFormat: event.target.value })}>
+                      <option value="png">PNG</option>
+                      <option value="webp">WebP</option>
+                      <option value="gif">GIF</option>
+                    </select>
+                  </NodeRow>
+                </>
               ) : isDepthAnything || isSam3Image ? null : (
                 <NodeRow label="Draw Mode">
                   <select value={node.data.dwposeDrawMode || "body-pose"} onChange={(event) => onUpdate(node.id, { dwposeDrawMode: event.target.value })}>
@@ -3045,6 +3226,7 @@ function NodeBody({
             </>
           )}
         </details>
+        <p className="utility-model-description">{utilityDescription}</p>
       </div>
     );
   }
@@ -3460,7 +3642,8 @@ function getNodeConfig(type) {
         { id: "imageIn", label: "Image", color: portColors.image },
         { id: "promptIn", label: "Prompt", color: portColors.prompt },
         { id: "referenceImageIn", label: "Reference Image", color: portColors.image },
-        { id: "referenceVideoIn", label: "Control Video", color: portColors.video }
+        { id: "referenceVideoIn", label: "Control Video", color: portColors.video },
+        { id: "maskVideoIn", label: "Mask Video", color: portColors.video }
       ],
       output: [{ id: "utilityOut", label: "Output", color: portColors.image }]
     },
@@ -3622,6 +3805,19 @@ function isUtilitySam3VideoModel(model) {
   return normalized.includes("sam") && normalized.includes("video");
 }
 
+function isUtilityBirefnetImageModel(model) {
+  return String(model || "").toLowerCase().includes("birefnet");
+}
+
+function isUtilityBirefnetVideoModel(model) {
+  return String(model || "").toLowerCase().includes("birefnet");
+}
+
+function isUtilityVoidVideoModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("void") || normalized.includes("inpaint");
+}
+
 function utilityMode(node) {
   return node?.data?.utilityMode === "image" ? "image" : "video";
 }
@@ -3639,15 +3835,30 @@ function utilityInputPortIds(mode, imageModel = utilityImageModelNames.dwpose, v
     return isUtilitySam3ImageModel(imageModel) ? ["promptIn", "imageIn"] : ["imageIn"];
   }
 
+  if (isUtilityBirefnetVideoModel(videoModel)) return ["referenceVideoIn"];
+  if (isUtilityVoidVideoModel(videoModel)) return ["promptIn", "referenceVideoIn", "maskVideoIn"];
   return isUtilitySam3VideoModel(videoModel) ? ["promptIn", "referenceVideoIn"] : ["promptIn", "referenceImageIn", "referenceVideoIn"];
 }
 
 function normalizedUtilityImageModelName(model) {
   const normalized = String(model || "").toLowerCase();
   if (normalized.includes("sam") && normalized.includes("image")) return utilityImageModelNames.sam3Image;
+  if (normalized.includes("birefnet")) return utilityImageModelNames.birefnetImage;
   if (normalized.includes("depth") || normalized.includes("anything")) return utilityImageModelNames.depthAnything;
   if (normalized.includes("patina")) return utilityImageModelNames.patina;
   return utilityImageModelNames.dwpose;
+}
+
+function normalizedUtilityVideoModelName(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("video")) return utilityVideoModelNames.sam3Video;
+  if (normalized.includes("birefnet")) return utilityVideoModelNames.birefnetVideo;
+  if (normalized.includes("void") || normalized.includes("inpaint")) return utilityVideoModelNames.voidVideoInpainting;
+  return utilityVideoModelNames.wanFunControl;
+}
+
+function utilityModelDescription(model) {
+  return utilityModelDescriptions[model] || "Utility preprocessing model.";
 }
 
 function patinaMapsForData(data = {}) {
@@ -4023,6 +4234,7 @@ async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, pr
       model: node.data.utilityVideoModel || utilityVideoModelNames.wanFunControl,
       referenceImageUrls: connectedAssetUrls(incoming.referenceImageIn),
       referenceVideoUrls: connectedAssetUrls(incoming.referenceVideoIn),
+      maskVideoUrls: connectedAssetUrls(incoming.maskVideoIn),
       wanFunControl: {
         preprocessVideo: node.data.preprocessVideo !== false,
         preprocessType: node.data.preprocessType || "depth",
@@ -4038,6 +4250,28 @@ async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, pr
       sam3Video: {
         detectionThreshold: node.data.sam3VideoDetectionThreshold ?? 0.5
       },
+      voidVideoInpainting: {
+        maskPrompt: node.data.voidMaskPrompt || "",
+        enablePass2Refinement: Boolean(node.data.voidPass2Refinement),
+        negativePrompt: node.data.voidNegativePrompt || "",
+        numInferenceSteps: node.data.voidNumInferenceSteps || 30,
+        guidanceScale: node.data.voidGuidanceScale || 1,
+        strength: node.data.voidStrength || 1,
+        numFrames: node.data.voidNumFrames || 85,
+        enableSafetyChecker: node.data.voidEnableSafetyChecker !== false,
+        seed: node.data.voidSeed || ""
+      },
+      birefnet: {
+        model: node.data.birefnetModel || "General Use (Light)",
+        operatingResolution: node.data.birefnetOperatingResolution || "1024x1024",
+        outputMask: Boolean(node.data.birefnetOutputMask),
+        refineForeground: node.data.birefnetRefineForeground !== false,
+        outputFormat: node.data.birefnetOutputFormat || "png",
+        maskOnly: Boolean(node.data.birefnetMaskOnly),
+        videoOutputType: node.data.birefnetVideoOutputType || "X264 (.mp4)",
+        videoQuality: node.data.birefnetVideoQuality || "high",
+        videoWriteMode: node.data.birefnetVideoWriteMode || "balanced"
+      },
       projectId,
       projectName,
       nodeId: node.id,
@@ -4045,6 +4279,18 @@ async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, pr
     })
   }, "Utility video");
   if (!response.ok) throw new Error(`Run ${index + 1}: ${data.error || "Utility video failed."}`);
+
+  if (Array.isArray(data.videos) && data.videos.length) {
+    return data.videos
+      .filter((video) => video?.localUrl)
+      .map((video, itemIndex) => ({
+        url: video.localUrl,
+        type: "video",
+        label: video.label || `${data.modelName || "Video"} ${itemIndex + 1}`,
+        seed: data.seed,
+        cost: itemIndex === 0 ? data.cost : null
+      }));
+  }
 
   return {
     url: data.video.localUrl,
@@ -4517,7 +4763,7 @@ function normalizeUtilityData(data = {}) {
     utilityMode: data.utilityMode === "image" ? "image" : "video",
     model: videoModelNames.wanFunControl,
     utilityImageModel: normalizedUtilityImageModelName(data.utilityImageModel),
-    utilityVideoModel: data.utilityVideoModel || utilityVideoModelNames.wanFunControl,
+    utilityVideoModel: normalizedUtilityVideoModelName(data.utilityVideoModel),
     dwposeDrawMode: data.dwposeDrawMode || "body-pose",
     patinaMaps: patinaMapsForData(data),
     patinaOutputFormat: data.patinaOutputFormat || "png",
