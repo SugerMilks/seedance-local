@@ -28,7 +28,6 @@ const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.
 const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.24);
 const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
 const falUtilityImageTimeoutMs = Math.max(30000, Number(process.env.FAL_UTILITY_IMAGE_TIMEOUT_MS) || 180000);
-const openAiImageApiKey = process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY;
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
 const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
@@ -71,8 +70,7 @@ app.get("/api/health", (_req, res) => {
       utilityVideo: true
     },
     falKeyConfigured: Boolean(process.env.FAL_KEY),
-    openAiKeyConfigured: Boolean(openAiImageApiKey),
-    openAiImageKeyConfigured: Boolean(openAiImageApiKey),
+    openAiImage2ViaFalConfigured: Boolean(process.env.FAL_KEY),
     outputDirectory: outputsDir
   });
 });
@@ -313,21 +311,19 @@ app.post("/api/node/generate-image", async (req, res) => {
       });
     }
 
-    if (selectedModel.provider === "openai") {
-      if (!openAiImageApiKey) {
-        return res.status(400).json({ error: "Missing OPENAI_IMAGE_API_KEY in .env." });
+    if (selectedModel.provider === "fal-openai-image-2") {
+      if (!process.env.FAL_KEY) {
+        return res.status(400).json({ error: "Missing FAL_KEY in .env." });
       }
 
-      const openAiImage = await generateOpenAiImage({
+      const openAiImage = await generateFalOpenAiImage2({
         prompt,
         imagePromptUrls,
         imagePromptLabels,
         aspectRatio: req.body.aspectRatio,
         resolution: req.body.resolution
       });
-      const extension = extensionForMime(openAiImage.mimeType);
-      const fileName = uniqueOutputFileName("openai-image-2", extension);
-      await writeFile(path.join(outputsDir, fileName), openAiImage.bytes);
+      const output = await downloadImage(openAiImage.remoteImage.url, "openai-image-2", openAiImage.remoteImage.content_type || openAiImage.remoteImage.mimeType);
 
       const cost = estimateOpenAiImage2Cost({
         resolution: req.body.resolution,
@@ -338,9 +334,9 @@ app.post("/api/node/generate-image", async (req, res) => {
         id: randomUUID(),
         createdAt: new Date().toISOString(),
         mediaType: "image",
-        provider: "OpenAI",
+        provider: "fal.ai",
         modelName: selectedModel.displayName,
-        endpoint: selectedModel.id,
+        endpoint: openAiImage.endpoint,
         mode: imagePromptUrls.length ? "Image edit with references" : "Image generation",
         prompt,
         submittedPrompt: openAiImage.submittedPrompt,
@@ -355,19 +351,21 @@ app.post("/api/node/generate-image", async (req, res) => {
           imagePromptCount: imagePromptUrls.length
         },
         cost,
-        localImage: `/outputs/${fileName}`,
-        outputFileName: fileName,
-        outputBytes: openAiImage.bytes.length,
-        text: openAiImage.revisedPrompt || ""
+        remoteImage: openAiImage.remoteImage,
+        localImage: output.publicPath,
+        outputFileName: output.fileName,
+        outputBytes: output.bytes,
+        text: openAiImage.resultText || ""
       });
 
       return res.json({
-        text: openAiImage.revisedPrompt || "",
+        text: openAiImage.resultText || "",
         cost,
         image: {
-          localUrl: `/outputs/${fileName}`,
-          fileName,
-          mimeType: openAiImage.mimeType
+          ...openAiImage.remoteImage,
+          localUrl: output.publicPath,
+          fileName: output.fileName,
+          mimeType: output.mimeType
         }
       });
     }
@@ -2439,9 +2437,9 @@ function resolveImageModel(model) {
 
   if (normalized.includes("openai") || normalized.includes("gpt-image-2") || normalized.includes("image 2")) {
     return {
-      provider: "openai",
+      provider: "fal-openai-image-2",
       displayName: "OpenAI Image 2",
-      id: "gpt-image-2"
+      id: "openai/gpt-image-2"
     };
   }
 
@@ -2669,7 +2667,7 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function generateOpenAiImage({ prompt, imagePromptUrls, imagePromptLabels, aspectRatio, resolution }) {
+async function generateFalOpenAiImage2({ prompt, imagePromptUrls, imagePromptLabels, aspectRatio, resolution }) {
   const imageInputs = [];
 
   for (const [index, imagePromptUrl] of imagePromptUrls.entries()) {
@@ -2682,76 +2680,53 @@ async function generateOpenAiImage({ prompt, imagePromptUrls, imagePromptLabels,
   }
 
   const size = normalizeOpenAiImageSize({ aspectRatio, resolution });
-  const quality = normalizeOpenAiImageQuality(process.env.OPENAI_IMAGE_2_QUALITY || "medium");
+  const quality = normalizeOpenAiImageQuality(process.env.FAL_OPENAI_IMAGE_2_QUALITY || process.env.OPENAI_IMAGE_2_QUALITY || "medium");
   const submittedPrompt = promptWithReferenceLabels(prompt, imageInputs);
-  const endpoint = imageInputs.length ? "https://api.openai.com/v1/images/edits" : "https://api.openai.com/v1/images/generations";
-  const requestOptions = imageInputs.length
-    ? openAiImageEditRequest({ prompt: submittedPrompt, imageInputs, size, quality })
-    : openAiImageGenerationRequest({ prompt: submittedPrompt, size, quality });
+  const endpoint = imageInputs.length ? "openai/gpt-image-2/edit" : "openai/gpt-image-2";
+  const input = {
+    prompt: submittedPrompt,
+    image_size: openAiSizeToFalImageSize(size),
+    quality,
+    num_images: 1,
+    output_format: "png",
+    sync_mode: false
+  };
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${openAiImageApiKey}`,
-      ...requestOptions.headers
-    },
-    body: requestOptions.body
-  });
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data?.error?.message || "OpenAI image generation failed.");
+  if (imageInputs.length) {
+    input.image_urls = await Promise.all(imageInputs.slice(0, 16).map(uploadImageInputToFal));
   }
 
-  const image = data?.data?.[0];
-  const base64Image = image?.b64_json || image?.b64;
-  if (!base64Image) {
-    throw new Error("OpenAI returned no image data.");
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteImage = firstFalImageResult(result?.data);
+
+  if (!remoteImage?.url) {
+    throw new Error("Fal returned no OpenAI Image 2 image URL.");
   }
 
   return {
-    bytes: Buffer.from(base64Image, "base64"),
-    mimeType: mimeForOpenAiOutputFormat("png"),
+    endpoint,
+    remoteImage,
     size,
     quality,
     submittedPrompt,
-    revisedPrompt: image?.revised_prompt || ""
+    resultText: result?.data?.revised_prompt || result?.data?.prompt || ""
   };
 }
 
-function openAiImageGenerationRequest({ prompt, size, quality }) {
-  return {
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-image-2",
-      prompt,
-      size,
-      quality,
-      output_format: "png"
-    })
-  };
+function openAiSizeToFalImageSize(size) {
+  const [width, height] = String(size || "").split("x").map((value) => Number(value));
+  if (!width || !height) return "landscape_16_9";
+  return { width, height };
 }
 
-function openAiImageEditRequest({ prompt, imageInputs, size, quality }) {
-  const form = new FormData();
-  form.append("model", "gpt-image-2");
-  form.append("prompt", prompt);
-  form.append("size", size);
-  form.append("quality", quality);
-  form.append("output_format", "png");
-
-  imageInputs.slice(0, 16).forEach((image, index) => {
-    const extension = extensionForMime(image.mimeType);
-    const fileName = `${image.label || `reference-${index + 1}`}${extension}`;
-    form.append("image[]", new File([image.buffer], fileName, { type: image.mimeType }));
-  });
-
-  return {
-    headers: {},
-    body: form
-  };
+function uploadImageInputToFal(image, index) {
+  const extension = extensionForMime(image.mimeType);
+  const fallbackName = path.basename(image.fileName || "", path.extname(image.fileName || "")) || `reference-${index + 1}`;
+  const safeName = String(image.label || fallbackName)
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || `reference-${index + 1}`;
+  return fal.storage.upload(new File([image.buffer], `${safeName}${extension}`, { type: image.mimeType }));
 }
 
 function promptWithReferenceLabels(prompt, imageInputs) {
@@ -2789,12 +2764,6 @@ function normalizeOpenAiImageSize({ aspectRatio, resolution }) {
   };
 
   return sizeMap[normalizedResolution]?.[ratio] || sizeMap["2K"]["21:9"];
-}
-
-function mimeForOpenAiOutputFormat(format) {
-  if (format === "jpeg") return "image/jpeg";
-  if (format === "webp") return "image/webp";
-  return "image/png";
 }
 
 function extensionForMime(mimeType) {
