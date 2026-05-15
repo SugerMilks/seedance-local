@@ -1258,7 +1258,6 @@ export default function NodeEditor({ active = true } = {}) {
     if (source.type === "camera") {
       if (from.port === "imageOut") {
         if (target.type === "preview" && to.port === "sourceIn") return "";
-        if (target.type === "text" && to.port === "imageIn") return "";
         if (target.type === "camera" && to.port === "imageIn") return "";
         if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
         if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
@@ -1278,7 +1277,7 @@ export default function NodeEditor({ active = true } = {}) {
 
     if (source?.type === "style") {
       if ((source.data.stylePreset || "None") === "None") return "Choose a Style preset before connecting";
-      if ((target.type === "imageModel" || target.type === "text") && to.port === "styleIn") return "";
+      if (target.type === "imageModel" && to.port === "styleIn") return "";
       return "Style presets connect to Style inputs";
     }
 
@@ -1296,14 +1295,12 @@ export default function NodeEditor({ active = true } = {}) {
     if (source.type === "utility") {
       if (utilityOutputType(source) === "video") {
         if (target.type === "preview" && to.port === "sourceIn") return "";
-        if (target.type === "text" && to.port === "videoIn") return "";
         if (target.type === "videoModel" && to.port === "referenceVideoIn") return "";
         if (target.type === "utility" && ["referenceVideoIn", "maskVideoIn"].includes(to.port)) return "";
         return "Utility video output connects to video inputs";
       }
 
       if (target.type === "preview" && to.port === "sourceIn") return "";
-      if (target.type === "text" && to.port === "imageIn") return "";
       if (target.type === "camera" && to.port === "imageIn") return "";
       if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
       if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
@@ -1331,28 +1328,6 @@ export default function NodeEditor({ active = true } = {}) {
     if (target?.type === "preview") {
       if (["image", "video", "imageModel", "videoModel", "utility", "transfer"].includes(source?.type)) return "";
       return "Preview accepts image and video sources";
-    }
-
-    if (target?.type === "text") {
-      if (to.port === "textIn") {
-        if (["text", "imageModel", "videoModel"].includes(source.type)) return "";
-        return "Text input accepts text outputs";
-      }
-
-      if (to.port === "imageIn") {
-        if (["image", "imageModel", "transfer"].includes(source.type)) return "";
-        return "Image input accepts image outputs";
-      }
-
-      if (to.port === "videoIn") {
-        if (["video", "videoModel"].includes(source.type)) return "";
-        return "Video input accepts video outputs";
-      }
-
-      if (to.port === "styleIn") {
-        if (source.type === "style") return "";
-        return "Style input accepts style outputs";
-      }
     }
 
     return "";
@@ -1605,11 +1580,7 @@ export default function NodeEditor({ active = true } = {}) {
     const batchCount = isSingleRunSegmentation ? 1 : nodeBatchCount(currentNode);
 
     try {
-      const runningPatch =
-        currentNode.type === "text"
-          ? { status: "running", error: "" }
-          : { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 };
-      updateNode(currentNode.id, runningPatch);
+      updateNode(currentNode.id, { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 });
 
       if (currentNode.type === "camera") {
         const generated = await runCameraQwenEdit({ node: currentNode, incoming, projectId, projectName });
@@ -1621,17 +1592,6 @@ export default function NodeEditor({ active = true } = {}) {
           resultText: generated.prompt || "",
           seed: generated.seed,
           error: ""
-        });
-        return { status: "complete" };
-      }
-
-      if (currentNode.type === "text") {
-        const processed = await runTextNodeProcessing({ node: currentNode, incoming, projectId, projectName });
-        updateNode(currentNode.id, {
-          status: "complete",
-          error: "",
-          resultText: processed.text,
-          lastRunModel: processed.model
         });
         return { status: "complete" };
       }
@@ -2558,54 +2518,15 @@ function NodeBody({
   const outputPort = config.output[0];
 
   if (node.type === "text") {
-    const hasOutputPanel = Boolean(node.data.resultText) || node.data.status === "running" || node.data.status === "complete";
-    const textPort = config.input.find((port) => port.id === "textIn");
-    const imagePort = config.input.find((port) => port.id === "imageIn");
-    const videoPort = config.input.find((port) => port.id === "videoIn");
-    const stylePort = config.input.find((port) => port.id === "styleIn");
-    const hasRunInput =
-      Boolean(String(node.data.text || "").trim()) ||
-      Boolean(incoming.textIn?.length) ||
-      Boolean(incoming.imageIn?.length) ||
-      Boolean(incoming.videoIn?.length) ||
-      Boolean(incoming.styleIn?.length);
     return (
       <div className="node-body text-node-body">
         <OutputPortRow node={node} port={outputPort} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
-        <div className="text-input-port-stack" aria-label="Text node inputs">
-          {[textPort, imagePort, videoPort, stylePort].filter(Boolean).map((port) => (
-            <PortHandle
-              key={port.id}
-              node={node}
-              port={port}
-              side="input"
-              onConnectStart={onConnectStart}
-              onDisconnectInput={onDisconnectInput}
-              connectedPortKeys={connectedPortKeys}
-            />
-          ))}
-        </div>
-        <div className={hasOutputPanel ? "text-split-panel" : "text-single-panel"}>
+        <div className="text-single-panel">
           <label className="text-field-group">
-            <span>Original prompt</span>
+            <span>Prompt</span>
             <textarea value={node.data.text} onChange={(event) => onUpdate(node.id, { text: event.target.value })} />
           </label>
-          {hasOutputPanel && (
-            <label className="text-field-group">
-              <span>Output</span>
-              <textarea
-                value={node.data.resultText || ""}
-                placeholder={running ? "Running..." : "Output will appear here"}
-                onChange={(event) => onUpdate(node.id, { resultText: event.target.value })}
-              />
-            </label>
-          )}
         </div>
-        <button className="run-node-button" onClick={() => onRun(node)} disabled={running || !hasRunInput}>
-          {running ? "Running..." : "Run Text"}
-        </button>
-        {node.data.lastRunModel && <small className="upload-status">Processed with {node.data.lastRunModel}</small>}
-        {node.data.error && <small className="upload-error">{node.data.error}</small>}
       </div>
     );
   }
@@ -3616,12 +3537,7 @@ function getNodeConfig(type) {
   const configs = {
     text: {
       icon: Type,
-      input: [
-        { id: "textIn", label: "Text", color: portColors.prompt },
-        { id: "imageIn", label: "Image", color: portColors.image },
-        { id: "videoIn", label: "Video", color: portColors.video },
-        { id: "styleIn", label: "Style", color: portColors.style }
-      ],
+      input: [],
       output: [{ id: "promptOut", label: "Prompt", color: portColors.prompt }]
     },
     image: {
@@ -3965,7 +3881,7 @@ function buildInactiveEdgeIds(nodes, edges) {
 function connectedText(items = []) {
   return items
     .map(({ source }) => {
-      if (source.type === "text") return source.data.resultText || source.data.text;
+      if (source.type === "text") return source.data.text;
       if (source.type === "imageModel" || source.type === "videoModel" || source.type === "utility") return source.data.resultText;
       return source.data.title;
     })
@@ -3975,60 +3891,6 @@ function connectedText(items = []) {
 
 function connectedAssetUrls(items = []) {
   return items.map(({ source }) => source.data.resultUrl).filter(Boolean);
-}
-
-function connectedTextInputItems(items = []) {
-  return items
-    .map(({ source }) => ({
-      label: sourceLabel(source),
-      text: source.type === "text" ? source.data.resultText || source.data.text : source.data.resultText || source.data.prompt || source.data.title
-    }))
-    .filter((item) => item.text);
-}
-
-function connectedStyleInputItems(items = []) {
-  return items
-    .map(({ source }) => ({
-      label: `Style: ${sourceLabel(source)}`,
-      text: promptPiecesForSource(source).join("\n\n")
-    }))
-    .filter((item) => item.text);
-}
-
-function connectedMediaInputItems(items = [], mediaType) {
-  return items
-    .map(({ source }) => {
-      if (!source.data.resultUrl) return null;
-      return {
-        url: source.data.resultUrl,
-        label: sourceLabel(source),
-        type: mediaType
-      };
-    })
-    .filter(Boolean);
-}
-
-async function runTextNodeProcessing({ node, incoming, projectId, projectName }) {
-  const { response, data } = await fetchJsonApi("/api/node/process-text", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      text: node.data.text,
-      textInputs: [...connectedTextInputItems(incoming.textIn), ...connectedStyleInputItems(incoming.styleIn)],
-      imageInputs: connectedMediaInputItems(incoming.imageIn, "image"),
-      videoInputs: connectedMediaInputItems(incoming.videoIn, "video"),
-      projectId,
-      projectName,
-      nodeId: node.id,
-      nodeTitle: node.data.title
-    })
-  }, "Text processing");
-  if (!response.ok) throw new Error(data.error || "Text processing failed.");
-
-  return {
-    text: data.text || "",
-    model: data.model || ""
-  };
 }
 
 async function runCameraQwenEdit({ node, incoming, projectId, projectName }) {
@@ -4539,7 +4401,7 @@ function finiteNumber(value, fallback) {
 }
 
 function isRunnableNode(node) {
-  return ["text", "imageModel", "videoModel", "utility"].includes(node.type) || (node.type === "camera" && node.data.qwenCameraOpen);
+  return ["imageModel", "videoModel", "utility"].includes(node.type) || (node.type === "camera" && node.data.qwenCameraOpen);
 }
 
 function buildSelectedRunnableDependencies(nodes, edges) {
@@ -4904,6 +4766,7 @@ function normalizeEdgeForCurrentGraph(edge, nodeMap) {
 
   const nextEdge = cloneEdge(edge);
   const target = nodeMap.get(edge.to.nodeId);
+  if (!target) return null;
 
   if (target?.type === "utility" && !utilityInputPortIds(target.data?.utilityMode, target.data?.utilityImageModel, target.data?.utilityVideoModel).includes(nextEdge.to.port)) {
     return null;
@@ -4936,13 +4799,15 @@ function normalizeEdgeForCurrentGraph(edge, nodeMap) {
     nextEdge.color = utilityOutputType(source) === "video" ? portColors.video : portColors.image;
   }
 
+  if (!inputPortIdsForNode(target).includes(nextEdge.to.port)) return null;
+  if (!outputPortIdsForNode(source).includes(nextEdge.from.port)) return null;
+
   return nextEdge;
 }
 
 function isCameraImageEdge(edge, target) {
   if (edge.from.port === "imageOut") return true;
   if (edge.to.port === "sourceIn") return true;
-  if (target?.type === "text" && edge.to.port === "imageIn") return true;
   if (target?.type === "camera" && edge.to.port === "imageIn") return true;
   if (target?.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(edge.to.port)) return true;
   if (target?.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(edge.to.port)) return true;

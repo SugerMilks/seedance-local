@@ -27,17 +27,8 @@ const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECO
 const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.134);
 const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.24);
 const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
-const falTextRequestCost = Number(process.env.FAL_TEXT_REQUEST_COST || 0.001);
-const falVisionTextUnitCost = Number(process.env.FAL_VISION_TEXT_UNIT_COST || 0.01);
-const falVideoTextUnitCost = Number(process.env.FAL_VIDEO_TEXT_UNIT_COST || 0.01);
 const falUtilityImageTimeoutMs = Math.max(30000, Number(process.env.FAL_UTILITY_IMAGE_TIMEOUT_MS) || 180000);
-const openAiTextModel = process.env.OPENAI_TEXT_MODEL || "gpt-5.5";
-const openAiTextApiKey = process.env.OPENAI_TEXT_API_KEY || process.env.OPENAI_API_KEY;
 const openAiImageApiKey = process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY;
-const textLlmProvider = String(process.env.TEXT_LLM_PROVIDER || "fal").toLowerCase();
-const falTextModel = process.env.FAL_TEXT_MODEL || "openai/gpt-4o";
-const falVisionTextModel = process.env.FAL_VISION_TEXT_MODEL || falTextModel;
-const falVideoTextModel = process.env.FAL_VIDEO_TEXT_MODEL || "google/gemini-2.5-flash";
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
 const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
@@ -80,13 +71,8 @@ app.get("/api/health", (_req, res) => {
       utilityVideo: true
     },
     falKeyConfigured: Boolean(process.env.FAL_KEY),
-    openAiKeyConfigured: Boolean(process.env.OPENAI_API_KEY || openAiTextApiKey || openAiImageApiKey),
-    openAiTextKeyConfigured: Boolean(openAiTextApiKey),
+    openAiKeyConfigured: Boolean(openAiImageApiKey),
     openAiImageKeyConfigured: Boolean(openAiImageApiKey),
-    textLlmProvider,
-    falTextModel,
-    falVisionTextModel,
-    falVideoTextModel,
     outputDirectory: outputsDir
   });
 });
@@ -112,12 +98,6 @@ app.get("/api/stats", async (_req, res) => {
       },
       openAiImage2: {
         mediumCost: openAiImage2MediumCost,
-        currency: "USD"
-      },
-      textProcessing: {
-        falRequestCost: falTextRequestCost,
-        falVisionUnitCost: falVisionTextUnitCost,
-        falVideoUnitCost: falVideoTextUnitCost,
         currency: "USD"
       }
     }
@@ -282,56 +262,6 @@ app.post("/api/node/upload-style-collage", upload.single("asset"), async (req, r
 
 app.post("/api/node/upload-transfer-collage", upload.single("asset"), async (req, res) => {
   return handleTransferCollageUpload(req, res);
-});
-
-app.post("/api/node/process-text", async (req, res) => {
-  try {
-    const text = String(req.body.text || "").trim();
-    const textInputs = normalizedTextInputs(req.body.textInputs);
-    const imageInputs = normalizedMediaInputs(req.body.imageInputs, "image");
-    const videoInputs = normalizedMediaInputs(req.body.videoInputs, "video");
-    if (!text && !textInputs.length && !imageInputs.length && !videoInputs.length) {
-      return res.status(400).json({ error: "Text is required." });
-    }
-
-    const result = textLlmProvider === "openai" ? await processTextWithOpenAi({ text, textInputs, imageInputs, videoInputs }) : await processTextWithFal({ text, textInputs, imageInputs, videoInputs });
-    const cost = estimateTextProcessingCost({ provider: result.provider, imageInputs, videoInputs });
-
-    await appendHistory({
-      id: randomUUID(),
-      createdAt: new Date().toISOString(),
-      mediaType: "text",
-      provider: result.provider,
-      modelName: result.model,
-      endpoint: result.endpoint,
-      mode: "Text processing",
-      prompt: text || textInputs.map((item) => item.text).join("\n\n"),
-      submittedPrompt: result.submittedPrompt || text,
-      project: projectFromBody(req.body),
-      node: nodeFromBody(req.body),
-      settings: {
-        model: result.model,
-        provider: result.provider,
-        textInputCount: textInputs.length,
-        imageInputCount: imageInputs.length,
-        videoInputCount: videoInputs.length
-      },
-      cost,
-      text: result.text,
-      usage: result.usage || null
-    });
-
-    res.json({
-      text: result.text,
-      model: result.model,
-      provider: result.provider,
-      cost,
-      usage: result.usage || null
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message || "Text processing failed." });
-  }
 });
 
 async function handleTransferCollageUpload(req, res) {
@@ -2431,25 +2361,6 @@ function estimateOpenAiImage2Cost({ resolution, size, quality }) {
   };
 }
 
-function estimateTextProcessingCost({ provider, imageInputs = [], videoInputs = [] }) {
-  const normalizedProvider = String(provider || "").toLowerCase();
-  const textRequestCost = normalizedProvider === "fal" ? falTextRequestCost : 0;
-  const imageHelperCost = normalizedProvider === "fal" && imageInputs.length ? falVisionTextUnitCost : 0;
-  const videoHelperCost = normalizedProvider === "fal" && videoInputs.length ? falVideoTextUnitCost : 0;
-  const amountUsd = roundCurrency(textRequestCost + imageHelperCost + videoHelperCost);
-
-  return {
-    amountUsd,
-    currency: "USD",
-    unitRateUsd: textRequestCost,
-    units: 1,
-    unit: "request",
-    mediaType: "text",
-    pricingBasis: normalizedProvider === "fal" ? "fal.ai any-llm request estimate plus media helper calls" : "No local token estimate for OpenAI text",
-    pricingSource: "configured-pricing-v1"
-  };
-}
-
 function durationToSeconds(duration) {
   if (duration === "auto") return 15;
   const match = String(duration || "15").match(/\d+/);
@@ -2474,206 +2385,6 @@ function nodeFromBody(body) {
   const title = String(body.nodeTitle || "").trim();
   if (!id && !title) return undefined;
   return { id, title };
-}
-
-function normalizedTextInputs(items) {
-  if (!Array.isArray(items)) return [];
-  return items
-    .map((item) => ({
-      label: String(item?.label || "Text input").trim(),
-      text: String(item?.text || "").trim()
-    }))
-    .filter((item) => item.text)
-    .slice(0, 8);
-}
-
-function normalizedMediaInputs(items, mediaType) {
-  if (!Array.isArray(items)) return [];
-  return items
-    .map((item) => ({
-      label: String(item?.label || `${mediaType} input`).trim(),
-      url: String(item?.url || "").trim(),
-      type: mediaType
-    }))
-    .filter((item) => isLocalAssetUrl(item.url))
-    .slice(0, 6);
-}
-
-function textInputContext(textInputs) {
-  return textInputs.map((item, index) => `Text input ${index + 1} (${item.label}):\n${item.text}`).join("\n\n");
-}
-
-function buildTextProcessingPrompt({ text, textInputs, imageDescriptions = [], videoDescriptions = [] }) {
-  return [
-    textProcessingInstructions(),
-    text ? `Original prompt:\n${text}` : "",
-    textInputContext(textInputs),
-    imageDescriptions.length ? `Image context:\n${imageDescriptions.join("\n\n")}` : "",
-    videoDescriptions.length ? `Video context:\n${videoDescriptions.join("\n\n")}` : "",
-    "Return only the final processed prompt text."
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-async function processTextWithFal({ text, textInputs, imageInputs, videoInputs }) {
-  if (!process.env.FAL_KEY) {
-    throw new Error("Missing FAL_KEY in .env.");
-  }
-
-  const model = falTextModel;
-  const imageDescriptions = await describeImageInputs(imageInputs);
-  const videoDescriptions = await describeVideoInputs(videoInputs);
-  const prompt = buildTextProcessingPrompt({ text, textInputs, imageDescriptions, videoDescriptions });
-  const data = await fal.subscribe("fal-ai/any-llm", {
-    input: {
-      model,
-      prompt
-    },
-    logs: true
-  });
-  const outputText = extractFalText(data).trim();
-
-  if (!outputText) {
-    throw new Error("fal returned no text.");
-  }
-
-  return {
-    text: outputText,
-    model,
-    provider: "fal",
-    endpoint: "fal-ai/any-llm",
-    submittedPrompt: prompt,
-    usage: data?.usage || data?.metrics || null
-  };
-}
-
-async function processTextWithOpenAi({ text, textInputs, imageInputs, videoInputs }) {
-  if (!openAiTextApiKey) {
-    throw new Error("Missing OPENAI_TEXT_API_KEY in .env.");
-  }
-
-  const model = openAiTextModel;
-  const prompt = buildTextProcessingPrompt({
-    text,
-    textInputs,
-    imageDescriptions: imageInputs.map((item, index) => `Image ${index + 1} (${item.label}): ${item.url}`),
-    videoDescriptions: videoInputs.map((item, index) => `Video ${index + 1} (${item.label}): ${item.url}`)
-  });
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${openAiTextApiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      instructions: textProcessingInstructions(),
-      input: prompt
-    })
-  });
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data?.error?.message || "Text processing failed.");
-  }
-
-  const outputText = extractOpenAiResponseText(data).trim();
-  if (!outputText) {
-    throw new Error("OpenAI returned no text.");
-  }
-
-  return {
-    text: outputText,
-    model,
-    provider: "OpenAI",
-    endpoint: model,
-    submittedPrompt: prompt,
-    usage: data.usage || null
-  };
-}
-
-function textProcessingInstructions() {
-  return "Process the available text, image, and video context for use in a creative node workflow. Improve clarity, specificity, and usefulness while preserving the user's intent.";
-}
-
-async function describeImageInputs(imageInputs) {
-  if (!imageInputs.length) return [];
-
-  const imageUrls = await Promise.all(imageInputs.map((item) => localAssetToFalUrl(item.url)));
-  const data = await fal.subscribe("openrouter/router/vision", {
-    input: {
-      image_urls: imageUrls,
-      prompt: "Describe these images as concise visual prompt context. Focus on subject, setting, composition, camera, lighting, palette, mood, materials, and any important details.",
-      system_prompt: "Return only useful prompt context. Do not use markdown.",
-      model: falVisionTextModel
-    },
-    logs: true
-  });
-  const description = extractFalText(data).trim();
-  return description ? [`Connected images: ${description}`] : [];
-}
-
-async function describeVideoInputs(videoInputs) {
-  if (!videoInputs.length) return [];
-
-  const videoUrls = await Promise.all(videoInputs.map((item) => localAssetToFalUrl(item.url)));
-  const data = await fal.subscribe("openrouter/router/video", {
-    input: {
-      video_urls: videoUrls,
-      prompt: "Describe these videos as concise visual prompt context. Focus on subjects, actions, setting, camera movement, lighting, style, mood, and any useful continuity details.",
-      system_prompt: "Return only useful prompt context. Do not use markdown.",
-      model: falVideoTextModel
-    },
-    logs: true
-  });
-  const description = extractFalText(data).trim();
-  return description ? [`Connected videos: ${description}`] : [];
-}
-
-async function localAssetToFalUrl(publicPath) {
-  const asset = await readLocalAsset(publicPath);
-  return fal.storage.upload(
-    new File([asset.buffer], asset.fileName, {
-      type: asset.mimeType || "application/octet-stream"
-    })
-  );
-}
-
-function extractOpenAiResponseText(response) {
-  if (typeof response?.output_text === "string") return response.output_text;
-
-  return (response?.output || [])
-    .flatMap((item) => item?.content || [])
-    .map((content) => content?.text || "")
-    .filter(Boolean)
-    .join("\n");
-}
-
-function extractFalText(data) {
-  if (typeof data === "string") return data;
-  if (typeof data?.data?.output === "string") return data.data.output;
-  if (typeof data?.data?.text === "string") return data.data.text;
-  if (typeof data?.data?.response === "string") return data.data.response;
-  if (typeof data?.data?.content === "string") return data.data.content;
-  if (typeof data?.data?.message?.content === "string") return data.data.message.content;
-  if (typeof data?.data?.choices?.[0]?.message?.content === "string") return data.data.choices[0].message.content;
-  if (typeof data?.data?.choices?.[0]?.text === "string") return data.data.choices[0].text;
-  if (typeof data?.output === "string") return data.output;
-  if (typeof data?.text === "string") return data.text;
-  if (typeof data?.response === "string") return data.response;
-  if (typeof data?.content === "string") return data.content;
-  if (typeof data?.message?.content === "string") return data.message.content;
-  if (typeof data?.choices?.[0]?.message?.content === "string") return data.choices[0].message.content;
-  if (typeof data?.choices?.[0]?.text === "string") return data.choices[0].text;
-
-  const content = data?.output?.[0]?.content?.[0];
-  if (typeof content?.text === "string") return content.text;
-
-  const nestedContent = data?.data?.output?.[0]?.content?.[0];
-  if (typeof nestedContent?.text === "string") return nestedContent.text;
-
-  return "";
 }
 
 function routeKindLabel(routeKind, speed) {
